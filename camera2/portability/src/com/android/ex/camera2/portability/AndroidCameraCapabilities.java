@@ -27,7 +27,7 @@ import java.util.List;
 /**
  * The subclass of {@link CameraCapabilities} for Android Camera 1 API.
  */
-class AndroidCameraCapabilities extends CameraCapabilities {
+class AndroidCameraCapabilities extends SprdAndroidCameraCapabilities {
 
     private static Log.Tag TAG = new Log.Tag("AndCamCapabs");
 
@@ -38,7 +38,7 @@ class AndroidCameraCapabilities extends CameraCapabilities {
     private SizeComparator mSizeComparator = new SizeComparator();
 
     AndroidCameraCapabilities(Camera.Parameters p) {
-        super(new Stringifier());
+        super(new Stringifier(), p);
         mMaxExposureCompensation = p.getMaxExposureCompensation();
         mMinExposureCompensation = p.getMinExposureCompensation();
         mExposureCompensationStep = p.getExposureCompensationStep();
@@ -170,10 +170,20 @@ class AndroidCameraCapabilities extends CameraCapabilities {
 
     private void buildFlashModes(Camera.Parameters p) {
         List<String> supportedFlashModes = p.getSupportedFlashModes();
+
+        // SPRD
+        Log.i(TAG, "supportedFlashModes = " + supportedFlashModes);
+
         if (supportedFlashModes == null) {
+            mIsSupportFlash = false;
             // Camera 1 will return NULL if no flash mode is supported.
             mSupportedFlashModes.add(FlashMode.NO_FLASH);
+            mSupportedFlashModes.add(FlashMode.AUTO);
+            mSupportedFlashModes.add(FlashMode.OFF);
+            mSupportedFlashModes.add(FlashMode.ON);
+            mSupportedFlashModes.add(FlashMode.TORCH);
         } else {
+            mIsSupportFlash = true;
             for (String flash : supportedFlashModes) {
                 if (Camera.Parameters.FLASH_MODE_AUTO.equals(flash)) {
                     mSupportedFlashModes.add(FlashMode.AUTO);

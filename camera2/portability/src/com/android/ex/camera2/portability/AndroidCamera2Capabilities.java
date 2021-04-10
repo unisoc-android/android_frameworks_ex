@@ -35,11 +35,11 @@ import java.util.Arrays;
 /**
  * The subclass of {@link CameraCapabilities} for Android Camera 2 API.
  */
-public class AndroidCamera2Capabilities extends CameraCapabilities {
+public class AndroidCamera2Capabilities extends SprdAndroidCamera2Capabilities {
     private static Log.Tag TAG = new Log.Tag("AndCam2Capabs");
 
-    AndroidCamera2Capabilities(CameraCharacteristics p) {
-        super(new Stringifier());
+    public AndroidCamera2Capabilities(CameraCharacteristics p) {
+        super(new Stringifier(), p);
 
         StreamConfigurationMap s = p.get(SCALER_STREAM_CONFIGURATION_MAP);
 
@@ -127,6 +127,12 @@ public class AndroidCamera2Capabilities extends CameraCapabilities {
                     mSupportedFlashModes.add(FlashMode.RED_EYE);
                 }
             }
+            mIsSupportFlash = true;
+        } else {
+            mSupportedFlashModes.add(FlashMode.AUTO);
+            mSupportedFlashModes.add(FlashMode.ON);
+            mSupportedFlashModes.add(FlashMode.TORCH);
+            mIsSupportFlash = false;
         }
     }
 

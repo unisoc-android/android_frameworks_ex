@@ -24,7 +24,7 @@ import com.android.ex.camera2.portability.debug.Log;
 /**
  * The device info for all attached cameras.
  */
-public interface CameraDeviceInfo {
+public interface CameraDeviceInfo extends SprdCameraDeviceInfo {
 
     static final int NO_DEVICE = -1;
 

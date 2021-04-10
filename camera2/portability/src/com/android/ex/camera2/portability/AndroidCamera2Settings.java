@@ -189,33 +189,37 @@ public class AndroidCamera2Settings extends CameraSettings {
         // Compute the crop rectangle to be passed to the framework
         mCropRectangle.set(0, 0,
                 toIntConstrained(
-                        mActiveArray.width() / mCurrentZoomRatio, 0, mActiveArray.width()),
+                        mActiveArray.width() / mCurrentZoomRatio, 0, (int)(mActiveArray.width()/mZoomMin)),
                 toIntConstrained(
-                        mActiveArray.height() / mCurrentZoomRatio, 0, mActiveArray.height()));
-        mCropRectangle.offsetTo((mActiveArray.width() - mCropRectangle.width()) / 2,
-                (mActiveArray.height() - mCropRectangle.height()) / 2);
+                        mActiveArray.height() / mCurrentZoomRatio, 0, (int)(mActiveArray.height()/mZoomMin)));
+        mCropRectangle.offsetTo(((int)(mActiveArray.width()/mZoomMin) - mCropRectangle.width()) / 2,
+                ((int)(mActiveArray.height()/mZoomMin) - mCropRectangle.height()) / 2);
 
         // Compute the effective crop rectangle to be used for computing focus/metering coordinates
         mVisiblePreviewRectangle =
                 effectiveCropRectFromRequested(mCropRectangle, mCurrentPreviewSize);
     }
 
-    private boolean matchesTemplateDefault(Key<?> setting) {
+    protected boolean matchesTemplateDefault(Key<?> setting) {
         if (setting == CONTROL_AE_REGIONS) {
             return mMeteringAreas.size() == 0;
         } else if (setting == CONTROL_AF_REGIONS) {
             return mFocusAreas.size() == 0;
         } else if (setting == CONTROL_AE_TARGET_FPS_RANGE) {
             Range<Integer> defaultFpsRange = mTemplateSettings.get(CONTROL_AE_TARGET_FPS_RANGE);
-            return (mPreviewFpsRangeMin == 0 && mPreviewFpsRangeMax == 0) ||
+            return (mPreviewFpsRangeMin == 0 && mPreviewFpsRangeMax == 0) || (!mEnterVideoMode &&
                     (defaultFpsRange != null && mPreviewFpsRangeMin == defaultFpsRange.getLower() &&
-                            mPreviewFpsRangeMax == defaultFpsRange.getUpper());
+                            mPreviewFpsRangeMax == defaultFpsRange.getUpper()));
         } else if (setting == JPEG_QUALITY) {
             return Objects.equals(mJpegCompressQuality,
                     mTemplateSettings.get(JPEG_QUALITY));
         } else if (setting == CONTROL_AE_EXPOSURE_COMPENSATION) {
             return Objects.equals(mExposureCompensationIndex,
                     mTemplateSettings.get(CONTROL_AE_EXPOSURE_COMPENSATION));
+        } else if (setting == SENSOR_EXPOSURE_TIME) {
+        	return Objects.equals(mExposureTime, mTemplateSettings.get(SENSOR_EXPOSURE_TIME));
+        } else if (setting == LENS_FOCUS_DISTANCE) {
+        	return Objects.equals(mFocusDistance, mTemplateSettings.get(LENS_FOCUS_DISTANCE));
         } else if (setting == CONTROL_VIDEO_STABILIZATION_MODE) {
             Integer videoStabilization = mTemplateSettings.get(CONTROL_VIDEO_STABILIZATION_MODE);
             return (videoStabilization != null &&
@@ -245,7 +249,7 @@ public class AndroidCamera2Settings extends CameraSettings {
         return true;
     }
 
-    private <T> void updateRequestSettingOrForceToDefault(Key<T> setting, T possibleChoice) {
+    protected <T> void updateRequestSettingOrForceToDefault(Key<T> setting, T possibleChoice) {
         mRequestSettings.set(setting, matchesTemplateDefault(setting) ? null : possibleChoice);
     }
 
@@ -285,11 +289,10 @@ public class AndroidCamera2Settings extends CameraSettings {
         } else {
             updateRequestSettingOrForceToDefault(JPEG_THUMBNAIL_SIZE, null);
         }
-
         return mRequestSettings;
     }
 
-    private MeteringRectangle[] legacyAreasToMeteringRectangles(
+    protected MeteringRectangle[] legacyAreasToMeteringRectangles(
             List<android.hardware.Camera.Area> reference) {
         MeteringRectangle[] transformed = null;
         if (reference.size() > 0) {
@@ -328,20 +331,24 @@ public class AndroidCamera2Settings extends CameraSettings {
     private void updateRequestFlashMode() {
         Integer aeMode = null;
         Integer flashMode = null;
+        int flashLcdMode = 0;
         if (mCurrentFlashMode != null) {
             switch (mCurrentFlashMode) {
                 case AUTO: {
                     aeMode = CONTROL_AE_MODE_ON_AUTO_FLASH;
+                    flashLcdMode = 1;
                     break;
                 }
                 case OFF: {
                     aeMode = CONTROL_AE_MODE_ON;
                     flashMode = FLASH_MODE_OFF;
+                    flashLcdMode = 0;
                     break;
                 }
                 case ON: {
                     aeMode = CONTROL_AE_MODE_ON_ALWAYS_FLASH;
                     flashMode = FLASH_MODE_SINGLE;
+                    flashLcdMode = 2;
                     break;
                 }
                 case TORCH: {
@@ -358,8 +365,15 @@ public class AndroidCamera2Settings extends CameraSettings {
                 }
             }
         }
-        mRequestSettings.set(CONTROL_AE_MODE, aeMode);
-        mRequestSettings.set(FLASH_MODE, flashMode);
+        if (mCurrentFlashType == VALUE_FRONT_FLASH_MODE_LED) {
+            //set flash mode for led
+            mRequestSettings.set(CONTROL_AE_MODE, aeMode);
+            mRequestSettings.set(FLASH_MODE, flashMode);
+        } else {
+            //set flash mode for lcd
+            mRequestSettings.set(ANDROID_SPRD_FLASH_LCD_MODE,(byte)flashLcdMode);
+        }
+
     }
 
     private void updateRequestFocusMode() {

@@ -24,9 +24,14 @@ import android.os.Build;
 import android.os.Handler;
 import android.os.Looper;
 import android.os.Message;
+import android.view.Surface;
 import android.view.SurfaceHolder;
+import static com.android.ex.camera2.portability.SprdCameraStateHolder.CAMERA_WITH_THUMB;
 
 import com.android.ex.camera2.portability.debug.Log;
+
+import java.util.ArrayList;
+import java.util.List;
 
 /**
  * An interface which provides possible camera device operations.
@@ -42,10 +47,55 @@ import com.android.ex.camera2.portability.debug.Log;
  * {@code android.hardware.Camera.ErrorCallback},
  * {@code android.hardware.Camera.OnZoomChangeListener}, and
  */
-public abstract class CameraAgent {
+public abstract class CameraAgent extends SprdCameraAgent {
     public static final long CAMERA_OPERATION_TIMEOUT_MS = 3500;
 
+    //hal config for mult-cam id
+//    typedef enum {
+//        SPRD_MULTI_CAMERA_BASE_ID = 16,
+//        SPRD_3D_VIDEO_ID,
+//        SPRD_RANGE_FINDER_ID,
+//        SPRD_3D_CAPTURE_ID,
+//        SPRD_3D_CALIBRATION_ID = 20,
+//        SPRD_REFOCUS_ID,
+//        SPRD_3D_PREVIEW_ID,
+//        SPRD_SOFY_OPTICAL_ZOOM_ID,
+//        SPRD_BLUR_ID,
+//        SPRD_SELF_SHOT_ID = 25,
+//        SPRD_PAGE_TURN_ID,
+//        SPRD_BLUR_FRONT_ID,
+//        SPRD_BOKEH_ID,
+//        SPRD_SBS_ID,
+//        SPRD_SINGLE_FACEID_REGISTER_ID = 30,
+//        SPRD_SINGLE_FACEID_UNLOCK_ID,
+//        SPRD_DUAL_FACEID_REGISTER_ID,
+//        SPRD_DUAL_FACEID_UNLOCK_ID,
+//        SPRD_MULTI_CAMERA_MAX_ID
+//    }
+    public static final int SPRD_3D_VIDEO_ID = 17;
+    public static final int SPRD_RANGE_FINDER_ID = 18;
+    public static final int SPRD_3D_CAPTURE_ID = 19;
+    public static final int SPRD_3D_PREVIEW_ID = 22;
+    public static final int SPRD_SOFY_OPTICAL_ZOOM_ID = 23;
+    public static final int SPRD_BLUR_ID = 24;
+    public static final int SPRD_SELF_SHOT_ID = 25;
+    public static final int SPRD_BLUR_FRONT_ID = 27;
+    public static final int SPRD_BACK_ULTRA_WIDE_ANGLE_ID = 35;
+    public static final int SPRD_BACK_TRI_ID = 36;
+    public static final int SPRD_BACK_PORTRAIT_ID = 38;
+    public static final int SPRD_BACK_HIRES_ID = 37;
+    public static final int SPRD_FRONT_HIRES_ID = 39;
+
+
+    public static final int SPRD_BACK_IR_ID = 2;
+
+
+    public static final int SPRD_BACK_MACRO_ID = 3;
+
+
     private static final Log.Tag TAG = new Log.Tag("CamAgnt");
+
+    protected Runnable mCloseCameraRunnable = null; // for Bug 1172831
 
     public static class CameraStartPreviewCallbackForward
             implements CameraStartPreviewCallback {
@@ -109,12 +159,36 @@ public abstract class CameraAgent {
         }
 
         @Override
+        public void onDisconnected( int cameraId ){
+            mCallback.onDisconnected(cameraId);
+        }
+
+        @Override
         public void onCameraOpened(final CameraProxy camera) {
+            /*
+             * SPRD: Fix bug 607678 onOpened messages result error during processing @{
+             * Original Code
+             *
             mHandler.post(new Runnable() {
                 @Override
                 public void run() {
                     mCallback.onCameraOpened(camera);
                 }});
+             */
+            Log.i(TAG, " onCameraOpened , CameraProxy = " + camera);
+
+            mHandler.postAtFrontOfQueue(new Runnable() {
+                @Override
+                public void run() {
+                    // SPRD: if the state changes to CAMERA_UNOPENED before we are here,
+                    // NullException will happen, so make sure the current state is correct.
+                    // About the state defination, see implemention of child class.
+                    if (camera.getCameraState().getState() == 2) {
+                        mCallback.onCameraOpened(camera);
+                    }
+                }
+            });
+            /* @} */
         }
 
         @Override
@@ -213,7 +287,8 @@ public abstract class CameraAgent {
          * @param faces   Recognized face in the preview.
          * @param camera  The camera which the preview image comes from.
          */
-        public void onFaceDetection(Camera.Face[] faces, CameraProxy camera);
+        default public void onFaceDetection(Camera.Face[] faces, int[] attributes,boolean faceChange){}//SPRD:fix bug1117842
+        default public void onFaceDetection(Camera.Face[] faces, CameraProxy camera){}
     }
 
     /**
@@ -270,6 +345,14 @@ public abstract class CameraAgent {
          *            with the reconnect failure.
          */
         public void onReconnectionFailure(CameraAgent mgr, String info);
+
+
+        /**
+         * CallBAck When camera was disconnected by cameraservice if there is high
+         * priority pid
+         * @param cameraId
+         */
+        default public void onDisconnected( int cameraId ) {}//SPRD:fix bug1117842
     }
 
     /**
@@ -309,26 +392,50 @@ public abstract class CameraAgent {
             if (synced) {
                 // Don't bother to wait since camera is in bad state.
                 if (getCameraState().isInvalid()) {
+                    Log.e(TAG,"closeCamera return");
                     return;
                 }
                 final WaitDoneBundle bundle = new WaitDoneBundle();
-
-                getDispatchThread().runJobSync(new Runnable() {
-                    @Override
-                    public void run() {
-                        getCameraHandler().obtainMessage(CameraActions.RELEASE).sendToTarget();
-                        getCameraHandler().post(bundle.mUnlockRunnable);
-                    }}, bundle.mWaitLock, CAMERA_OPERATION_TIMEOUT_MS, "camera release");
+                Log.i(TAG, "closeCamera getState = " + getCameraState().getState());
+                if (getCameraState().getState() == CAMERA_WITH_THUMB) {
+                    closeCameraAsyncWithState();
+                } else {
+                    getDispatchThread().runJobSync(new Runnable() {
+                        @Override
+                        public void run() {
+                            getCameraHandler().obtainMessage(CameraActions.RELEASE).sendToTarget();
+                            getCameraHandler().post(bundle.mUnlockRunnable);
+                        }}, bundle.mWaitLock, CAMERA_OPERATION_TIMEOUT_MS, "camera release");
+                }
             } else {
-                getDispatchThread().runJob(new Runnable() {
-                    @Override
-                    public void run() {
-                        getCameraHandler().removeCallbacksAndMessages(null);
-                        getCameraHandler().obtainMessage(CameraActions.RELEASE).sendToTarget();
-                    }});
+                if (mCloseCameraRunnable == null) {
+                    Log.i(TAG, "new runJob for close camera");
+                    mCloseCameraRunnable = new Runnable() {
+                        @Override
+                        public void run() {
+                            getCameraHandler().removeCallbacksAndMessages(null);
+                            getCameraHandler().obtainMessage(CameraActions.RELEASE).sendToTarget();
+                        }
+                    };
+                }
+                getDispatchThread().runJob(mCloseCameraRunnable);
             }
         } catch (final RuntimeException ex) {
+            /*
+             * SPRD:fix bug 493671 @{
+             * Original Code
+             *
             getCameraExceptionHandler().onDispatchThreadException(ex);
+             */
+            mCloseCameraRunnable = null;
+            if (getCameraExceptionHandler() != null) {
+                if (ex instanceof IllegalStateException) {
+                    Log.e(TAG, "DispatchThread Exception", ex);//SPRD:fix bug949730
+                } else {
+                    getCameraExceptionHandler().onDispatchThreadException(ex);
+                }
+            }
+            /*}@*/
         }
     }
 
@@ -374,8 +481,41 @@ public abstract class CameraAgent {
      * camera handler thread. All camera operations made through this interface is
      * asynchronous by default except those mentioned specifically.
      */
-    public abstract static class CameraProxy {
+    public abstract static class CameraProxy extends SprdCameraProxy {
+        protected List<Surface> recordSurfaces = new ArrayList<>();
+        protected boolean isMotionPhotoOn = false;
+        protected boolean surfacesChanged = false;
+        public boolean equalList(List list1, List list2) {
+            if(list1 == null && list2 == null){
+                return true;
+            }
 
+            if(list1 == null || list2 == null){
+                return false;
+            }
+
+            if (list1.size() != list2.size())
+                return false;
+            for (Object object : list1) {
+                if (!list2.contains(object))
+                    return false;
+            }
+            return true;
+        }
+
+        public void setRecordSurfaces(List<Surface> surface){
+            if(equalList(surface,recordSurfaces)){
+                surfacesChanged = false;
+                return;
+            }
+            surfacesChanged = true;
+            recordSurfaces.clear();
+            recordSurfaces = surface;
+        }
+
+        public void setMontionPhotoRecordOn(boolean on){
+            isMotionPhotoOn = on;
+        }
         /**
          * Returns the underlying {@link android.hardware.Camera} object used
          * by this proxy. This method should only be used when handing the
@@ -522,6 +662,7 @@ public abstract class CameraAgent {
         public void setPreviewTextureSync(final SurfaceTexture surfaceTexture) {
             // Don't bother to wait since camera is in bad state.
             if (getCameraState().isInvalid()) {
+                Log.e(TAG,"setPreviewTextureSync return");
                 return;
             }
             final WaitDoneBundle bundle = new WaitDoneBundle();
@@ -600,18 +741,33 @@ public abstract class CameraAgent {
         public void stopPreview() {
             // Don't bother to wait since camera is in bad state.
             if (getCameraState().isInvalid()) {
+                Log.e(TAG,"stopPreview return");
                 return;
             }
             final WaitDoneBundle bundle = new WaitDoneBundle();
             try {
-                getDispatchThread().runJobSync(new Runnable() {
-                    @Override
-                    public void run() {
-                        getCameraHandler().obtainMessage(CameraActions.STOP_PREVIEW, bundle)
-                                .sendToTarget();
-                    }}, bundle.mWaitLock, CAMERA_OPERATION_TIMEOUT_MS, "stop preview");
+                Log.i(TAG, "stopPreview getState = " + getCameraState().getState());
+                if (getCameraState().getState() == CAMERA_WITH_THUMB) {
+                    stopPreviewWithAsync();
+                } else {
+                    getDispatchThread().runJobSync(new Runnable() {
+                        @Override
+                        public void run() {
+                            /**
+                             * SPRD:fix bug622519 should unlock when stoppreivew is return due to wrong state
+                            getCameraHandler().obtainMessage(CameraActions.STOP_PREVIEW, bundle)
+                             */
+                            getCameraHandler().obtainMessage(CameraActions.STOP_PREVIEW)
+                                    .sendToTarget();
+                            getCameraHandler().post(bundle.mUnlockRunnable);
+                        }}, bundle.mWaitLock, CAMERA_OPERATION_TIMEOUT_MS, "stop preview");
+                }
             } catch (final RuntimeException ex) {
-                getAgent().getCameraExceptionHandler().onDispatchThreadException(ex);
+                if (ex instanceof IllegalStateException) {
+                    Log.e(TAG, "DispatchThread Exception", ex);//SPRD:fix bug949730
+                } else {
+                    getAgent().getCameraExceptionHandler().onDispatchThreadException(ex);
+                }
             }
         }
 
@@ -865,9 +1021,18 @@ public abstract class CameraAgent {
                     public void run() {
                         CameraStateHolder cameraState = getCameraState();
                         // Don't bother to wait since camera is in bad state.
+                        /*
+                         * SPRD fix bug622519 should not wait when state is unopend @{
+                         * Original Code
+                         *
                         if (cameraState.isInvalid()) {
                             return;
                         }
+                         */
+                        if (cameraState.isInvalid() || cameraState.getState() == 1) {
+                            return;
+                        }
+                        /* @} */
                         cameraState.waitForStates(statesToAwait);
                         getCameraHandler().obtainMessage(CameraActions.APPLY_SETTINGS, copyOfSettings)
                                 .sendToTarget();
@@ -949,6 +1114,7 @@ public abstract class CameraAgent {
          * @return The state machine tracking the camera API's current mode.
          */
         public abstract CameraStateHolder getCameraState();
+
     }
 
     public static class WaitDoneBundle {

@@ -16,7 +16,7 @@
 
 package com.android.ex.camera2.portability;
 
-class CameraActions {
+class CameraActions extends SprdCameraActions {
     // Camera initialization/finalization
     public static final int OPEN_CAMERA = 1;
     public static final int RELEASE =     2;
@@ -113,7 +113,14 @@ class CameraActions {
             case CAPTURE_PHOTO:
                 return "CAPTURE_PHOTO";
             default:
+                /*
+                 * SPRD @{
+                 * Original Code
+                 *
                 return "UNKNOWN(" + action + ")";
+                 */
+                return stringifySprd(action);
+                /* @} */
         }
     }
 

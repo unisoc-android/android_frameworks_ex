@@ -28,12 +28,14 @@ import java.util.TreeMap;
 /**
  * A class which stores the camera settings.
  */
-public abstract class CameraSettings {
+public abstract class CameraSettings extends SprdCameraSettings {
     private static final Log.Tag TAG = new Log.Tag("CamSet");
 
     // Attempts to provide a value outside this range will be ignored.
     private static final int MIN_JPEG_COMPRESSION_QUALITY = 1;
     private static final int MAX_JPEG_COMPRESSION_QUALITY = 100;
+    protected static final int VALUE_FRONT_FLASH_MODE_LED = 1;
+    protected static final int VALUE_FRONT_FLASH_MODE_LCD = 2;
 
     protected final Map<String, String> mGeneralSetting = new TreeMap<>();
     protected final List<Camera.Area> mMeteringAreas = new ArrayList<>();
@@ -49,7 +51,10 @@ public abstract class CameraSettings {
     protected int mCurrentPhotoFormat;
     protected float mCurrentZoomRatio;
     protected int mExposureCompensationIndex;
+    protected long mExposureTime;
+    protected float mFocusDistance = -1;
     protected CameraCapabilities.FlashMode mCurrentFlashMode;
+    protected int mCurrentFlashType = 1;
     protected CameraCapabilities.FocusMode mCurrentFocusMode;
     protected CameraCapabilities.SceneMode mCurrentSceneMode;
     protected CameraCapabilities.WhiteBalance mWhiteBalance;
@@ -114,6 +119,9 @@ public abstract class CameraSettings {
      * @return The copy of the source.
      */
     protected CameraSettings(CameraSettings src) {
+        // SPRD
+        super(src);
+
         mGeneralSetting.putAll(src.mGeneralSetting);
         mMeteringAreas.addAll(src.mMeteringAreas);
         mFocusAreas.addAll(src.mFocusAreas);
@@ -130,7 +138,10 @@ public abstract class CameraSettings {
         mCurrentPhotoFormat = src.mCurrentPhotoFormat;
         mCurrentZoomRatio = src.mCurrentZoomRatio;
         mExposureCompensationIndex = src.mExposureCompensationIndex;
+        mExposureTime = src.mExposureTime;
+        mFocusDistance = src.mFocusDistance;
         mCurrentFlashMode = src.mCurrentFlashMode;
+        mCurrentFlashType = src.mCurrentFlashType;
         mCurrentFocusMode = src.mCurrentFocusMode;
         mCurrentSceneMode = src.mCurrentSceneMode;
         mWhiteBalance = src.mWhiteBalance;
@@ -350,6 +361,23 @@ public abstract class CameraSettings {
         return mExposureCompensationIndex;
     }
 
+    /** Exposure Time**/
+    public void setExposureTime(long value) {
+        mExposureTime = value;
+    }
+
+    public long getExposureTime() {
+        return mExposureTime;
+    }
+
+    public void setFocusDistance(float value) {
+        mFocusDistance = value;
+    }
+
+    public float getFocusDistance() {
+        return mFocusDistance;
+    }
+
     public void setAutoExposureLock(boolean locked) {
         mAutoExposureLocked = locked;
     }
@@ -386,6 +414,12 @@ public abstract class CameraSettings {
     public void setFlashMode(CameraCapabilities.FlashMode flashMode) {
         mCurrentFlashMode = flashMode;
     }
+
+    public void setFlashType(int flashType) {
+        mCurrentFlashType = flashType;
+    }
+
+    public int getCurrentFlashType() {return mCurrentFlashType;}
 
     /** Focus **/
 

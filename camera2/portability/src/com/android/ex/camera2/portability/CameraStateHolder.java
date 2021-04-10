@@ -20,7 +20,7 @@ import android.os.SystemClock;
 
 import com.android.ex.camera2.portability.debug.Log;
 
-public abstract class CameraStateHolder {
+public abstract class CameraStateHolder extends SprdCameraStateHolder {
     private static final Log.Tag TAG = new Log.Tag("CamStateHolder");
 
     private int mState;
@@ -43,7 +43,7 @@ public abstract class CameraStateHolder {
      */
     public synchronized void setState(int state) {
         if (mState != state) {
-            Log.v(TAG, "setState - state = " + Integer.toBinaryString(state));
+            Log.i(TAG, "setState - state = " + Integer.toBinaryString(state));
         }
         mState = state;
         this.notifyAll();
@@ -119,7 +119,7 @@ public abstract class CameraStateHolder {
      *         reached.
      */
     public boolean waitForStates(final int states) {
-        Log.v(TAG, "waitForStates - states = " + Integer.toBinaryString(states));
+        Log.v(TAG, "waitForStates - states = " + Integer.toBinaryString(states) + " getState() = " + getState());
         return waitForCondition(new ConditionChecker() {
             @Override
             public boolean success() {

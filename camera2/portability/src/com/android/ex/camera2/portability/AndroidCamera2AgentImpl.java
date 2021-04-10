@@ -31,11 +31,10 @@ import android.hardware.camera2.CameraManager;
 import android.hardware.camera2.CaptureFailure;
 import android.hardware.camera2.CaptureRequest;
 import android.hardware.camera2.CaptureResult;
+
 import android.hardware.camera2.TotalCaptureResult;
-import android.hardware.camera2.params.MeteringRectangle;
 import android.media.Image;
 import android.media.ImageReader;
-import android.media.MediaActionSound;
 import android.os.Build;
 import android.os.Handler;
 import android.os.HandlerThread;
@@ -53,19 +52,39 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
 
+// SPRD
+import android.view.SurfaceHolder;
+import static android.hardware.camera2.CaptureRequest.SPRD_CAPTURE_MODE;
+import static com.android.ex.camera2.portability.SprdCameraStateHolder.CAMERA_WITH_THUMB;
+import static com.android.ex.camera2.portability.SprdCameraStateHolder.CAMERA_RECODERING;
+
 /**
  * A class to implement {@link CameraAgent} of the Android camera2 framework.
  */
 class AndroidCamera2AgentImpl extends CameraAgent {
     private static final Log.Tag TAG = new Log.Tag("AndCam2AgntImp");
 
-    private final Camera2Handler mCameraHandler;
-    private final HandlerThread mCameraHandlerThread;
-    private final CameraStateHolder mCameraState;
-    private final DispatchThread mDispatchThread;
+    protected Camera2Handler mCameraHandler;
+    protected final HandlerThread mCameraHandlerThread;
+    protected final CameraStateHolder mCameraState;
+    protected final SprdDispatchThread mDispatchThread;
     private final CameraManager mCameraManager;
-    private final MediaActionSound mNoisemaker;
-    private CameraExceptionHandler mExceptionHandler;
+//    private final MediaActionSound mNoisemaker;
+    protected CameraExceptionHandler mExceptionHandler;
+
+    //SPRD:fix bug 473462 add burst capture
+    protected Camera2RequestSettingsSet mPersistentSettings;
+    protected SprdAndroidCamera2AgentImpl mSprdAgentImpl = null;
+
+    private CaptureAvailableListener mPicListener;
+    /*
+     * SPRD: Fix bug 672886 that not enough photo is
+     * saved though we have taken 99 pictures
+     */
+    protected boolean mBurstCaptureCanceled = true;
+    protected int mBurstHasCaptureCount = 0;
+    protected int mBurstMaxCaptureCount = 0;
+    /* @} */
 
     /**
      * Number of camera devices.  The length of {@code mCameraDevices} does not reveal this
@@ -83,17 +102,28 @@ class AndroidCamera2AgentImpl extends CameraAgent {
      */
     private final List<String> mCameraDevices;
 
+    protected boolean mNeedThumb = false;
+    protected boolean mIsVideMode = false;
+    protected boolean mIsEISenable = false;
+    protected CameraPreViewCallbackAbstract mPreviewCallback;
+    protected Size mPreviewSize;
+    protected Size mCallbackSize;
+    protected Surface mMediaRecoderSurface;
+    protected boolean mNeedAfBeforeCapture = true;
+    protected boolean mConfigPreivewCallback = false;
+
     AndroidCamera2AgentImpl(Context context) {
         mCameraHandlerThread = new HandlerThread("Camera2 Handler Thread");
         mCameraHandlerThread.start();
         mCameraHandler = new Camera2Handler(mCameraHandlerThread.getLooper());
         mExceptionHandler = new CameraExceptionHandler(mCameraHandler);
         mCameraState = new AndroidCamera2StateHolder();
-        mDispatchThread = new DispatchThread(mCameraHandler, mCameraHandlerThread);
+        mDispatchThread = new SprdDispatchThread(mCameraHandler, mCameraHandlerThread);
         mDispatchThread.start();
         mCameraManager = (CameraManager) context.getSystemService(Context.CAMERA_SERVICE);
-        mNoisemaker = new MediaActionSound();
-        mNoisemaker.load(MediaActionSound.SHUTTER_CLICK);
+        // SPRD
+//        mNoisemaker = new MediaActionSound();
+//        mNoisemaker.load(MediaActionSound.SHUTTER_CLICK);
 
         mNumCameraDevices = 0;
         mCameraDevices = new ArrayList<String>();
@@ -171,11 +201,11 @@ class AndroidCamera2AgentImpl extends CameraAgent {
         mExceptionHandler = exceptionHandler;
     }
 
-    private static abstract class CaptureAvailableListener
+    protected static abstract class CaptureAvailableListener
             extends CameraCaptureSession.CaptureCallback
             implements ImageReader.OnImageAvailableListener {};
 
-    private class Camera2Handler extends HistoryHandler {
+    protected class Camera2Handler extends HistoryHandler {
         // Caller-provided when leaving CAMERA_UNOPENED state:
         private CameraOpenCallback mOpenCallback;
         private int mCameraIndex;
@@ -183,21 +213,27 @@ class AndroidCamera2AgentImpl extends CameraAgent {
         private int mCancelAfPending = 0;
 
         // Available in CAMERA_UNCONFIGURED state and above:
-        private CameraDevice mCamera;
-        private AndroidCamera2ProxyImpl mCameraProxy;
-        private Camera2RequestSettingsSet mPersistentSettings;
-        private Rect mActiveArray;
+        protected CameraDevice mCamera;
+        protected AndroidCamera2ProxyImpl mCameraProxy;
+        // SPRD
+//        private Camera2RequestSettingsSet mPersistentSettings;
+        protected Rect mActiveArray;
         private boolean mLegacyDevice;
 
         // Available in CAMERA_CONFIGURED state and above:
-        private Size mPreviewSize;
-        private Size mPhotoSize;
+        protected Size mPhotoSize;
+        protected Size mThumbnailSize;
 
         // Available in PREVIEW_READY state and above:
-        private SurfaceTexture mPreviewTexture;
-        private Surface mPreviewSurface;
-        private CameraCaptureSession mSession;
-        private ImageReader mCaptureReader;
+        protected SurfaceTexture mPreviewTexture;
+        // SPRD
+        protected SurfaceHolder mSurfaceHolder;
+        protected Surface mPreviewSurface;
+        protected CameraCaptureSession mSession;
+        protected ImageReader mCaptureReader;
+        protected ImageReader mThumbnailReader;
+        protected ImageReader mPreviewReader;
+        private boolean mIsYuvSensor = false;//SPRD:fix bug956566
 
         // Available from the beginning of PREVIEW_ACTIVE until the first preview frame arrives:
         private CameraStartPreviewCallback mOneshotPreviewingCallback;
@@ -218,15 +254,67 @@ class AndroidCamera2AgentImpl extends CameraAgent {
             super(looper);
         }
 
+        /*
+         * SPRD: Fix bug 666647 that optimize log
+         */
+        private boolean mSuperHandled = false;
+
+        protected boolean superHandled() {
+            return mSuperHandled;
+        }
+        /* @} */
+
+        volatile boolean reconnect = false;
+
         @Override
         public void handleMessage(final Message msg) {
             super.handleMessage(msg);
-            Log.v(TAG, "handleMessage - action = '" + CameraActions.stringify(msg.what) + "'");
+            Log.i(TAG, "AppFW handleMessage - action = '" + CameraActions.stringify(msg.what) + "'");
             int cameraAction = msg.what;
             try {
+                // SPRD: Fix bug 666647 that optimize log
+                mSuperHandled = true;
+
                 switch (cameraAction) {
+                case CameraActions.RECONNECT: {
+                    // release camera start
+                    Log.e(TAG, "CameraActions.RECONNECT,Session = " + mSession + ";CameraDevice = " + mCamera + ";PreviewSurface = "
+                            + mPreviewSurface + ";CaptureReader = " + mCaptureReader);
+                    if (mSession != null) {
+                        Log.i(TAG, "closePreviewSession");
+                        closePreviewSession();
+                        mSession = null;
+                    }
+                    mPersistentSettings = null;
+                    mActiveArray = null;
+
+                    // open camera start
+                    CameraOpenCallback openCallback = (CameraOpenCallback) msg.obj;
+                    int cameraIndex = msg.arg1;
+
+                    mOpenCallback = openCallback;
+                    mCameraIndex = cameraIndex;
+                    if (mCameraIndex == SPRD_3D_VIDEO_ID || mCameraIndex == SPRD_RANGE_FINDER_ID || mCameraIndex == SPRD_3D_CAPTURE_ID || mCameraIndex == SPRD_BLUR_ID
+                            || mCameraIndex == SPRD_SELF_SHOT_ID || mCameraIndex == SPRD_BLUR_FRONT_ID || mCameraIndex == SPRD_SOFY_OPTICAL_ZOOM_ID
+                            || mCameraIndex == SPRD_BACK_ULTRA_WIDE_ANGLE_ID || mCameraIndex == SPRD_BACK_PORTRAIT_ID || mCameraIndex == SPRD_BACK_TRI_ID
+                            || mCameraIndex == SPRD_BACK_HIRES_ID || mCameraIndex == SPRD_FRONT_HIRES_ID || mCameraIndex == SPRD_BACK_IR_ID || mCameraIndex == SPRD_BACK_MACRO_ID) {
+                        mCameraId = "" + mCameraIndex;
+                    } else {
+                        mCameraId = mCameraDevices.get(mCameraIndex);
+                    }
+                    Log.i(TAG, String.format("reconnect camera index %d (id %s) with camera2 API",
+                            cameraIndex, mCameraId));
+
+                    if (mCameraId == null) {
+                        mOpenCallback.onCameraDisabled(msg.arg1);
+                        break;
+                    }
+                    reconnect = true;
+                    mCameraDeviceStateCallback.onOpened(mCamera);
+                    break;
+                }
                     case CameraActions.OPEN_CAMERA:
-                    case CameraActions.RECONNECT: {
+                     {
                         CameraOpenCallback openCallback = (CameraOpenCallback) msg.obj;
                         int cameraIndex = msg.arg1;
 
@@ -238,7 +326,23 @@ class AndroidCamera2AgentImpl extends CameraAgent {
 
                         mOpenCallback = openCallback;
                         mCameraIndex = cameraIndex;
+
+                        /*
+                         * SPRD: Fix bug 591216 that add new feature 3d range finding, only support API2 currently @{
+                         * Original Code
+                         *
                         mCameraId = mCameraDevices.get(mCameraIndex);
+                         */
+                        if (mCameraIndex == SPRD_3D_VIDEO_ID || mCameraIndex == SPRD_RANGE_FINDER_ID || mCameraIndex == SPRD_3D_CAPTURE_ID || mCameraIndex == SPRD_BLUR_ID
+                                || mCameraIndex == SPRD_SELF_SHOT_ID || mCameraIndex == SPRD_BLUR_FRONT_ID || mCameraIndex == SPRD_SOFY_OPTICAL_ZOOM_ID
+                                || mCameraIndex == SPRD_BACK_ULTRA_WIDE_ANGLE_ID || mCameraIndex == SPRD_BACK_PORTRAIT_ID || mCameraIndex == SPRD_BACK_TRI_ID
+                                || mCameraIndex == SPRD_BACK_HIRES_ID || mCameraIndex == SPRD_FRONT_HIRES_ID || mCameraIndex == SPRD_BACK_IR_ID || mCameraIndex == SPRD_BACK_MACRO_ID) {
+                            mCameraId = "" + mCameraIndex;
+                        } else {
+                            mCameraId = mCameraDevices.get(mCameraIndex);
+                        }
+                        /* @} */
+
                         Log.i(TAG, String.format("Opening camera index %d (id %s) with camera2 API",
                                 cameraIndex, mCameraId));
 
@@ -246,6 +350,7 @@ class AndroidCamera2AgentImpl extends CameraAgent {
                             mOpenCallback.onCameraDisabled(msg.arg1);
                             break;
                         }
+                        reconnect = false;
                         mCameraManager.openCamera(mCameraId, mCameraDeviceStateCallback, this);
 
                         break;
@@ -257,11 +362,21 @@ class AndroidCamera2AgentImpl extends CameraAgent {
                             break;
                         }
 
+                        // SPRD
+                        Log.i(TAG, "CameraActions.RELEASE,Session = " + mSession + ";CameraDevice = " + mCamera
+                                + ";PreviewSurface = " + mPreviewSurface + ";CaptureReader = " + mCaptureReader);
+
                         if (mSession != null) {
+                            // SPRD
+                            Log.i(TAG, "closePreviewSession");
+
                             closePreviewSession();
                             mSession = null;
                         }
                         if (mCamera != null) {
+                            // SPRD
+                            Log.i(TAG, "CameraDevice.close");
+
                             mCamera.close();
                             mCamera = null;
                         }
@@ -269,18 +384,49 @@ class AndroidCamera2AgentImpl extends CameraAgent {
                         mPersistentSettings = null;
                         mActiveArray = null;
                         if (mPreviewSurface != null) {
+                            // SPRD
+                            Log.i(TAG, "PreviewSurface.release");
+
                             mPreviewSurface.release();
                             mPreviewSurface = null;
                         }
                         mPreviewTexture = null;
+
+                        // SPRD
+                        mSurfaceHolder = null;
+
                         if (mCaptureReader != null) {
+                            // SPRD
+                            Log.i(TAG, "CaptureReader.close");
+
                             mCaptureReader.close();
                             mCaptureReader = null;
                         }
+                        if (mThumbnailReader != null) {
+                            Log.i(TAG, "mThumbnailReader.close");
+                            mThumbnailReader.close();
+                            mThumbnailReader = null;
+                        }
+                        if (mPreviewReader != null) {
+                            Log.i(TAG, "mPreviewReader.close");
+                            mPreviewReader.close();
+                            mPreviewReader = null;
+                        }
                         mPreviewSize = null;
                         mPhotoSize = null;
+                        mThumbnailSize = null;
+                        mOneshotCaptureCallback = null;//Sprd:fix bug955807
+                        mNeedThumb = false;
+                        mIsVideMode = false;
                         mCameraIndex = 0;
                         mCameraId = null;
+
+                        // SPRD
+                        if (mCameraCloseCallback != null) {
+                            mCameraCloseCallback.onCameraClosed();
+                        }
+                        mPicListener = null;// for oom
+
                         changeState(AndroidCamera2StateHolder.CAMERA_UNOPENED);
                         break;
                     }
@@ -294,7 +440,18 @@ class AndroidCamera2AgentImpl extends CameraAgent {
                     }*/
 
                     case CameraActions.SET_PREVIEW_TEXTURE_ASYNC: {
-                        setPreviewTexture((SurfaceTexture) msg.obj);
+                        if (reconnect) {
+                            Log.e(TAG, " reconnectting, forward SET_PREVIEW_TEXTURE_ASYNC to SET_PREVIEW_TEXTURE_ASYNC_WITHOUT_OPTIMIZE");
+                            msg.what = CameraActions.SET_PREVIEW_TEXTURE_ASYNC_WITHOUT_OPTIMIZE;
+                            handleMessage(msg);
+                            msg.what = CameraActions.SET_PREVIEW_TEXTURE_ASYNC;//SPRD:fix bug1036535
+                            changeState(AndroidCamera2StateHolder.CAMERA_PREVIEW_READY);
+                            //msg.obj is null, means to clear useless things. not want to reconnect
+                            if(msg.obj != null)
+                                reconnect = false;
+                        } else {
+                            setPreviewTexture((SurfaceTexture) msg.obj);
+                        }
                         break;
                     }
 
@@ -309,10 +466,52 @@ class AndroidCamera2AgentImpl extends CameraAgent {
                         mOneshotPreviewingCallback = (CameraStartPreviewCallback) msg.obj;
                         changeState(AndroidCamera2StateHolder.CAMERA_PREVIEW_ACTIVE);
                         try {
-                            mSession.setRepeatingRequest(
-                                    mPersistentSettings.createRequest(mCamera,
-                                            CameraDevice.TEMPLATE_PREVIEW, mPreviewSurface),
-                                    /*listener*/mCameraResultStateCallback, /*handler*/this);
+                            int template = CameraDevice.TEMPLATE_PREVIEW;
+                            if (mIsVideMode) {
+                                template = CameraDevice.TEMPLATE_RECORD;
+                            }
+                            if (mPreviewCallback != null && mPreviewReader != null) {
+                                ArrayList<Surface> surfaceList = new ArrayList<>();
+                                surfaceList.add(mPreviewSurface);
+                                surfaceList.add(mPreviewReader.getSurface());
+                                if(mCameraProxy.isMotionPhotoOn){
+                                    for (int i = 0; i< mCameraProxy.recordSurfaces.size(); i++){
+                                        surfaceList.add(mCameraProxy.recordSurfaces.get(i));
+                                    }
+                                }
+                                Surface[] surfaces = new Surface[surfaceList.size()];
+                                surfaceList.toArray(surfaces);
+                                mPreviewReader.setOnImageAvailableListener(mPreviewCallback, this);
+                                mSession.setRepeatingRequest(
+                                        mPersistentSettings.createRequest(mCamera,
+                                                template, surfaces),
+                                        /*listener*/mCameraResultStateCallback, /*handler*/this);
+//                                mPreviewReader.setOnImageAvailableListener(mPreviewCallback, this);
+//                                mSession.setRepeatingRequest(
+//                                        mPersistentSettings.createRequest(mCamera,
+//                                                template, mPreviewSurface, mPreviewReader.getSurface()),
+//                                        /*listener*/mCameraResultStateCallback, /*handler*/this);
+                            } else {
+                                ArrayList<Surface> surfaceList = new ArrayList<>();
+                                surfaceList.add(mPreviewSurface);
+                                if(mCameraProxy.isMotionPhotoOn && mCameraProxy.recordSurfaces != null){
+                                    for (int i = 0; i< mCameraProxy.recordSurfaces.size(); i++){
+                                        surfaceList.add(mCameraProxy.recordSurfaces.get(i));
+                                    }
+                                }
+
+                                Surface[] surfaces = new Surface[surfaceList.size()];
+                                surfaceList.toArray(surfaces);
+                                mSession.setRepeatingRequest(
+                                        mPersistentSettings.createRequest(mCamera,
+                                                template, surfaces),
+                                        /*listener*/mCameraResultStateCallback, /*handler*/this);
+
+//                                mSession.setRepeatingRequest(
+//                                        mPersistentSettings.createRequest(mCamera,
+//                                                template, mPreviewSurface),
+//                                        /*listener*/mCameraResultStateCallback, /*handler*/this);
+                            }
                         } catch(CameraAccessException ex) {
                             Log.w(TAG, "Unable to start preview", ex);
                             changeState(AndroidCamera2StateHolder.CAMERA_PREVIEW_READY);
@@ -328,11 +527,37 @@ class AndroidCamera2AgentImpl extends CameraAgent {
                         if (mCameraState.getState() <
                                         AndroidCamera2StateHolder.CAMERA_PREVIEW_ACTIVE) {
                             Log.w(TAG, "Refusing to stop preview at inappropriate time");
+                            /* SPRD:fix bug1036856 @{ */
+                            if (mCameraState.getState() == AndroidCamera2StateHolder.CAMERA_PREVIEW_READY)
+                                mCameraProxy.getSettings().setSizesLocked(false);
+                            /* @} */
                             break;
                         }
 
+                        /*
+                         * SPRD @{
+                         * Original Code
+                         *
                         mSession.stopRepeating();
                         changeState(AndroidCamera2StateHolder.CAMERA_PREVIEW_READY);
+                         */
+                        try {
+                            /* SPRD:fix bug671521 do flush when stoppreivew @{ */
+                            if (mSession != null) {//SPRD:fix bug1158180
+                                mSession.stopRepeating();
+                                mCameraProxy.getSettings().setSizesLocked(false);
+                                changeState(AndroidCamera2StateHolder.CAMERA_PREVIEW_READY);
+                                Log.i(TAG, "closePreviewSession");
+                                closePreviewSession();//set state if necessary
+                                mSession = null;
+                            }
+                            /* @} */
+                        }catch (CameraAccessException ex) {
+                            Log.w(TAG,"Unable to stop preview", ex );
+                            throw new RuntimeException("Unimplemented CameraProxy message=" + msg.what);
+                        }
+                        /* @} */
+
                         break;
                     }
 
@@ -376,7 +601,7 @@ class AndroidCamera2AgentImpl extends CameraAgent {
 
                     case CameraActions.AUTO_FOCUS: {
                         if (mCancelAfPending > 0) {
-                            Log.v(TAG, "handleMessage - Ignored AUTO_FOCUS because there was "
+                            Log.i(TAG, "handleMessage - Ignored AUTO_FOCUS because there was "
                                     + mCancelAfPending + " pending CANCEL_AUTO_FOCUS messages");
                             break; // ignore AF because a CANCEL_AF is queued after this
                         }
@@ -439,19 +664,35 @@ class AndroidCamera2AgentImpl extends CameraAgent {
                             }};
 
                         // Send a one-time capture to trigger the camera driver to lock focus.
-                        changeState(AndroidCamera2StateHolder.CAMERA_FOCUS_LOCKED);
+                        if (mCameraState.getState() != CAMERA_RECODERING) {
+                            changeState(AndroidCamera2StateHolder.CAMERA_FOCUS_LOCKED);
+                        }
                         Camera2RequestSettingsSet trigger =
                                 new Camera2RequestSettingsSet(mPersistentSettings);
                         trigger.set(CaptureRequest.CONTROL_AF_TRIGGER,
                                 CaptureRequest.CONTROL_AF_TRIGGER_START);
                         try {
-                            mSession.capture(
-                                    trigger.createRequest(mCamera, CameraDevice.TEMPLATE_PREVIEW,
-                                            mPreviewSurface),
+                            int template = CameraDevice.TEMPLATE_PREVIEW;
+                            if (mIsVideMode) {
+                                template = CameraDevice.TEMPLATE_RECORD;
+                            }
+                            //SPRD:fix bug 916601 add auto focus for recodering
+                            if (mCameraState.getState() == CAMERA_RECODERING) {
+                                mSession.capture(
+                                        trigger.createRequest(mCamera, template,
+                                                mPreviewSurface, mMediaRecoderSurface),
                                     /*listener*/deferredCallbackSetter, /*handler*/ this);
+                            } else {
+                                mSession.capture(
+                                        trigger.createRequest(mCamera, template,
+                                                mPreviewSurface),
+                                    /*listener*/deferredCallbackSetter, /*handler*/ this);
+                            }
                         } catch(CameraAccessException ex) {
                             Log.e(TAG, "Unable to lock autofocus", ex);
-                            changeState(AndroidCamera2StateHolder.CAMERA_PREVIEW_ACTIVE);
+                            if (mCameraState.getState() != CAMERA_RECODERING) {
+                                changeState(AndroidCamera2StateHolder.CAMERA_PREVIEW_ACTIVE);
+                            }
                         }
                         break;
                     }
@@ -462,23 +703,38 @@ class AndroidCamera2AgentImpl extends CameraAgent {
                         mCancelAfPending++;
                         // Why would you want to unlock the lens if it isn't already locked?
                         if (mCameraState.getState() <
-                                AndroidCamera2StateHolder.CAMERA_PREVIEW_ACTIVE) {
+                                //AndroidCamera2StateHolder.CAMERA_PREVIEW_ACTIVE || mCameraState.getState() == CAMERA_WITH_THUMB || mCameraState.getState() == CAMERA_RECODERING) {
+                                AndroidCamera2StateHolder.CAMERA_PREVIEW_ACTIVE || mCameraState.getState() == CAMERA_WITH_THUMB ||
+                                (mCameraState.getState() == CAMERA_RECODERING && !(android.os.SystemProperties.getBoolean("persist.sys.cam.record.afae" , true)))) {
                             Log.w(TAG, "Ignoring attempt to release focus lock without preview");
                             break;
                         }
 
-                        // Send a one-time capture to trigger the camera driver to resume scanning.
-                        changeState(AndroidCamera2StateHolder.CAMERA_PREVIEW_ACTIVE);
                         Camera2RequestSettingsSet cancel =
                                 new Camera2RequestSettingsSet(mPersistentSettings);
                         cancel.set(CaptureRequest.CONTROL_AF_TRIGGER,
                                 CaptureRequest.CONTROL_AF_TRIGGER_CANCEL);
+                        Log.i(TAG, "send CONTROL_AF_TRIGGER_CANCEL");
+
                         try {
-                            mSession.capture(
-                                    cancel.createRequest(mCamera, CameraDevice.TEMPLATE_PREVIEW,
-                                            mPreviewSurface),
+                            int template = CameraDevice.TEMPLATE_PREVIEW;
+                            if (mIsVideMode && mCameraState.getState() == CAMERA_RECODERING) {
+                                // video recoding
+                                template = CameraDevice.TEMPLATE_RECORD;
+                                mSession.capture(
+                                            cancel.createRequest(mCamera, template,
+                                                    mPreviewSurface, mMediaRecoderSurface),
+                                        /*listener*/mCameraResultStateCallback, /*handler*/this);
+                                Log.i(TAG , "CONTROL_AF in recording");
+                            } else {
+                                // preview (video or photo)
+                                changeState(AndroidCamera2StateHolder.CAMERA_PREVIEW_ACTIVE);
+                                mSession.capture(
+                                        cancel.createRequest(mCamera, template,
+                                                mPreviewSurface),
                                     /*listener*/null, /*handler*/this);
-                        } catch(CameraAccessException ex) {
+                            }
+                        } catch (CameraAccessException ex) {
                             Log.e(TAG, "Unable to cancel autofocus", ex);
                             changeState(AndroidCamera2StateHolder.CAMERA_FOCUS_LOCKED);
                         }
@@ -548,13 +804,18 @@ class AndroidCamera2AgentImpl extends CameraAgent {
 
                         final CaptureAvailableListener listener =
                                 (CaptureAvailableListener) msg.obj;
-                        if (mLegacyDevice ||
-                                (mCurrentAeState == CaptureResult.CONTROL_AE_STATE_CONVERGED &&
+                        if (mLegacyDevice || mIsYuvSensor || mCameraProxy.mLastSettings.mBurstNumber == 30 ||//SPRD: fix bug962989
+                                (mPersistentSettings.matches(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_OFF)) ||
+                                ((mCurrentAeState == CaptureResult.CONTROL_AE_STATE_CONVERGED || mCurrentAeState == CaptureResult.CONTROL_AE_STATE_FLASH_REQUIRED) &&//SPRD:fix bug1193947
                                 !mPersistentSettings.matches(CaptureRequest.CONTROL_AE_MODE,
                                         CaptureRequest.CONTROL_AE_MODE_ON_ALWAYS_FLASH) &&
                                 !mPersistentSettings.matches(CaptureRequest.FLASH_MODE,
                                         CaptureRequest.FLASH_MODE_SINGLE)))
                                 {
+
+                            // SPRD
+                            Log.i(TAG,"AppFw:   CameraActions.CAPTURE_PHOTO, mLegacyDevice = " + mLegacyDevice + " mIsYuvSensor = " + mIsYuvSensor);
+
                             // Legacy devices don't support the precapture state keys and instead
                             // perform autoexposure convergence automatically upon capture.
 
@@ -597,7 +858,7 @@ class AndroidCamera2AgentImpl extends CameraAgent {
                                 }
 
                                 private void checkAeState(CaptureResult result) {
-                                    if (result.get(CaptureResult.CONTROL_AE_STATE) != null &&
+                                    if (result.get(CaptureResult.CONTROL_AE_STATE) != null && mPicListener != null &&//SPRD:fix bug999808
                                             !mAlreadyDispatched) {
                                         // Now our mCameraResultStateCallback will invoke the
                                         // callback once the autoexposure routine has converged.
@@ -637,10 +898,15 @@ class AndroidCamera2AgentImpl extends CameraAgent {
 
                     default: {
                         // TODO: Rephrase once everything has been implemented
-                        throw new RuntimeException("Unimplemented CameraProxy message=" + msg.what);
+                        // SPRD
+//                        throw new RuntimeException("Unimplemented CameraProxy message=" + msg.what);
+                        mSuperHandled = false;
                     }
                 }
             } catch (final Exception ex) {
+                // SPRD
+                Log.w(TAG, "catch exception " + ex.getMessage());
+
                 if (cameraAction != CameraActions.RELEASE && mCamera != null) {
                     // TODO: Handle this better
                     mCamera.close();
@@ -669,7 +935,11 @@ class AndroidCamera2AgentImpl extends CameraAgent {
 
         public CameraSettings buildSettings(AndroidCamera2Capabilities caps) {
             try {
-                return new AndroidCamera2Settings(mCamera, CameraDevice.TEMPLATE_PREVIEW,
+                int template = CameraDevice.TEMPLATE_PREVIEW;
+                if (mIsVideMode) {
+                    template = CameraDevice.TEMPLATE_RECORD;
+                }
+                return new AndroidCamera2Settings(mCamera, template,
                         mActiveArray, mPreviewSize, mPhotoSize);
             } catch (CameraAccessException ex) {
                 Log.e(TAG, "Unable to query camera device to build settings representation");
@@ -692,14 +962,68 @@ class AndroidCamera2AgentImpl extends CameraAgent {
             mPersistentSettings.union(settings.getRequestSettings());
             mPreviewSize = settings.getCurrentPreviewSize();
             mPhotoSize = settings.getCurrentPhotoSize();
+            mThumbnailSize = settings.getExifThumbnailSize();
+            mNeedThumb = settings.getNeedThumbCallBack();
+            mIsVideMode = settings.getEnterVideoMode();
+            mIsEISenable = settings.getEOISEnable();
+            mCallbackSize = settings.getCurrentCallbackSize();
 
             if (mCameraState.getState() >= AndroidCamera2StateHolder.CAMERA_PREVIEW_ACTIVE) {
                 // If we're already previewing, reflect most settings immediately
                 try {
-                    mSession.setRepeatingRequest(
-                            mPersistentSettings.createRequest(mCamera,
-                                    CameraDevice.TEMPLATE_PREVIEW, mPreviewSurface),
-                            /*listener*/mCameraResultStateCallback, /*handler*/this);
+                    if (mCameraState.getState() == CAMERA_RECODERING) {
+                        startRecoderRequest();
+                    } else {
+                        int template = CameraDevice.TEMPLATE_PREVIEW;
+                        if (mIsVideMode) {
+                            template = CameraDevice.TEMPLATE_RECORD;
+                        }
+                        if (mPreviewCallback != null && mPreviewReader != null) {
+                            mPreviewReader.setOnImageAvailableListener(mPreviewCallback, this);
+                            ArrayList<Surface> surfaceList = new ArrayList<>();
+                            surfaceList.add(mPreviewSurface);
+                            surfaceList.add(mPreviewReader.getSurface());
+                            if(mCameraState.getState() > AndroidCamera2StateHolder.CAMERA_PREVIEW_READY){
+                                if(mCameraProxy.isMotionPhotoOn && mCameraProxy.recordSurfaces != null){
+                                    for (int i = 0; i< mCameraProxy.recordSurfaces.size(); i++){
+                                        surfaceList.add(mCameraProxy.recordSurfaces.get(i));
+                                    }
+                                }
+                            }
+
+                            Surface[] surfaces = new Surface[surfaceList.size()];
+                            surfaceList.toArray(surfaces);
+                            mSession.setRepeatingRequest(
+                                    mPersistentSettings.createRequest(mCamera,
+                                            template, surfaces),
+                                    /*listener*/mCameraResultStateCallback, /*handler*/this);
+//                            mSession.setRepeatingRequest(
+//                                    mPersistentSettings.createRequest(mCamera,
+//                                            template, mPreviewSurface, mPreviewReader.getSurface()),
+//                                    /*listener*/mCameraResultStateCallback, /*handler*/this);
+                        } else {
+                            ArrayList<Surface> surfaceList = new ArrayList<>();
+                            surfaceList.add(mPreviewSurface);
+                            if(mCameraState.getState() > AndroidCamera2StateHolder.CAMERA_PREVIEW_READY){
+                                if(mCameraProxy.isMotionPhotoOn && mCameraProxy.recordSurfaces != null){
+                                    for (int i = 0; i< mCameraProxy.recordSurfaces.size(); i++){
+                                        surfaceList.add(mCameraProxy.recordSurfaces.get(i));
+                                    }
+                                }
+                            }
+
+                            Surface[] surfaces = new Surface[surfaceList.size()];
+                            surfaceList.toArray(surfaces);
+                            mSession.setRepeatingRequest(
+                                    mPersistentSettings.createRequest(mCamera,
+                                            template, surfaces),
+                                    /*listener*/mCameraResultStateCallback, /*handler*/this);
+//                            mSession.setRepeatingRequest(
+//                                    mPersistentSettings.createRequest(mCamera,
+//                                            template, mPreviewSurface),
+//                                    /*listener*/mCameraResultStateCallback, /*handler*/this);
+                        }
+                    }
                 } catch (CameraAccessException ex) {
                     Log.e(TAG, "Failed to apply updated request settings", ex);
                 }
@@ -709,13 +1033,92 @@ class AndroidCamera2AgentImpl extends CameraAgent {
             }
         }
 
-        private void setPreviewTexture(SurfaceTexture surfaceTexture) {
+        protected void setPreviewTextureWithoutOptimize(SurfaceTexture surfaceTexture) {
             // TODO: Must be called after providing a .*Settings populated with sizes
             // TODO: We don't technically offer a selection of sizes tailored to SurfaceTextures!
 
             // TODO: Handle this error condition with a callback or exception
             if (mCameraState.getState() < AndroidCamera2StateHolder.CAMERA_CONFIGURED) {
                 Log.w(TAG, "Ignoring texture setting at inappropriate time");
+                return;
+            }
+
+            // Avoid initializing another capture session unless we absolutely have to
+            /*
+             * if (surfaceTexture == mPreviewTexture) { Log.i(TAG,
+             * "Optimizing out redundant preview texture setting"); return; }
+             */
+
+            if (mSession != null) {
+                closePreviewSession();
+            }
+
+            mPreviewTexture = surfaceTexture;
+            surfaceTexture.setDefaultBufferSize(mPreviewSize.width(), mPreviewSize.height());
+
+            if (mPreviewSurface != null) {
+                mPreviewSurface.release();
+            }
+            mPreviewSurface = new Surface(surfaceTexture);
+
+            if (mCaptureReader != null) {
+                mCaptureReader.close();
+            }
+            mCaptureReader = ImageReader.newInstance(
+                    mPhotoSize.width(), mPhotoSize.height(), ImageFormat.JPEG, 1);
+
+            if (mThumbnailReader != null) {
+                mThumbnailReader.close();
+            }
+
+            if (mPreviewReader != null) {
+                mPreviewReader.close();
+            }
+
+            try {
+
+                List<Surface> surfaceList = new ArrayList<>();
+
+                if(mCameraProxy.recordSurfaces != null &&mCameraProxy.recordSurfaces.size() > 0 ){
+                    surfaceList.addAll(mCameraProxy.recordSurfaces);
+                }
+
+                if (mNeedThumb) {
+                    mThumbnailReader = ImageReader.newInstance(
+                            mThumbnailSize.width(), mThumbnailSize.height(), ImageFormat.YUV_420_888, 1);
+                    surfaceList.addAll(Arrays.asList(mPreviewSurface, mCaptureReader.getSurface(), mThumbnailReader.getSurface()));
+
+                } else if (mPreviewCallback != null) {
+                    mPreviewReader = ImageReader.newInstance(
+                            mPreviewSize.width(), mPreviewSize.height(), ImageFormat.YUV_420_888, 1);
+                    surfaceList.addAll(Arrays.asList(mPreviewSurface, mPreviewReader.getSurface(), mCaptureReader.getSurface()));
+                } else {
+                    surfaceList.addAll(Arrays.asList(mPreviewSurface, mCaptureReader.getSurface()));
+                }
+                mCamera.createCaptureSession(surfaceList,
+                        mCameraPreviewStateCallback, this);
+            } catch (CameraAccessException ex) {
+                Log.e(TAG, "Failed to create camera capture session", ex);
+            }
+        }
+
+
+        private void setPreviewTexture(SurfaceTexture surfaceTexture) {
+            // SPRD
+            long start = System.currentTimeMillis();
+
+            // TODO: Must be called after providing a .*Settings populated with sizes
+            // TODO: We don't technically offer a selection of sizes tailored to SurfaceTextures!
+
+            // TODO: Handle this error condition with a callback or exception
+            if (mCameraState.getState() < AndroidCamera2StateHolder.CAMERA_CONFIGURED) {
+                Log.w(TAG, "Ignoring texture setting at inappropriate time");
+                return;
+            }
+
+            if(mCameraProxy.surfacesChanged){
+                setPreviewTextureWithoutOptimize(surfaceTexture);
+                mCameraProxy.surfacesChanged = false;
                 return;
             }
 
@@ -742,17 +1145,43 @@ class AndroidCamera2AgentImpl extends CameraAgent {
             }
             mCaptureReader = ImageReader.newInstance(
                     mPhotoSize.width(), mPhotoSize.height(), ImageFormat.JPEG, 1);
-
+            if (mThumbnailReader != null) {
+                mThumbnailReader.close();
+            }
+            if (mPreviewReader != null) {
+                mPreviewReader.close();
+            }
             try {
-                mCamera.createCaptureSession(
-                        Arrays.asList(mPreviewSurface, mCaptureReader.getSurface()),
+
+                List<Surface> surfaceList = new ArrayList<>();
+
+                if(mCameraProxy.recordSurfaces != null &&mCameraProxy.recordSurfaces.size() > 0 ){
+                    surfaceList.addAll(mCameraProxy.recordSurfaces);
+                }
+
+                if (mNeedThumb) {
+                    mThumbnailReader = ImageReader.newInstance(
+                            mThumbnailSize.width(), mThumbnailSize.height(), ImageFormat.YUV_420_888, 1);
+ 		    surfaceList.addAll(Arrays.asList(mPreviewSurface, mCaptureReader.getSurface(), mThumbnailReader.getSurface()));
+                } else if (mPreviewCallback != null || mConfigPreivewCallback) {
+                    mPreviewReader = ImageReader.newInstance(
+                            mCallbackSize.width(), mCallbackSize.height(), ImageFormat.YUV_420_888, 1);
+                    surfaceList.addAll(Arrays.asList(mPreviewSurface, mPreviewReader.getSurface(), mCaptureReader.getSurface()));
+                } else {
+                    surfaceList.addAll(Arrays.asList(mPreviewSurface, mCaptureReader.getSurface()));
+                }
+                mCamera.createCaptureSession(surfaceList,
                         mCameraPreviewStateCallback, this);
             } catch (CameraAccessException ex) {
                 Log.e(TAG, "Failed to create camera capture session", ex);
             }
+
+            // SPRD
+            long end = System.currentTimeMillis();
+            Log.i(TAG, "setPreviewTexture cost " + (end - start));
         }
 
-        private void closePreviewSession() {
+        protected void closePreviewSession() {
             try {
                 mSession.abortCaptures();
                 mSession = null;
@@ -762,7 +1191,7 @@ class AndroidCamera2AgentImpl extends CameraAgent {
             changeState(AndroidCamera2StateHolder.CAMERA_CONFIGURED);
         }
 
-        private void changeState(int newState) {
+        protected void changeState(int newState) {
             if (mCameraState.getState() != newState) {
                 mCameraState.setState(newState);
                 if (newState < AndroidCamera2StateHolder.CAMERA_PREVIEW_ACTIVE) {
@@ -777,33 +1206,75 @@ class AndroidCamera2AgentImpl extends CameraAgent {
                 new CameraDevice.StateCallback() {
             @Override
             public void onOpened(CameraDevice camera) {
+                // SPRD
+                Log.i(TAG,"onOpened CameraDevice will camera=" + camera);
+                if (mCameraId == null) {
+                    Log.e(TAG,"onOpened return");
+                    return;
+                }
+
                 mCamera = camera;
+                //Sprd: Fix bug958706
+                if (mDispatchThread.hasRunnable(mCloseCameraRunnable) ||
+                        mCameraHandler.hasMessages(CameraActions.RELEASE)) { // for Bug 1172831 & Bug 1180958
+                    Log.e(TAG,"camera will be released later, return");
+                    changeState(AndroidCamera2StateHolder.CAMERA_UNCONFIGURED);
+                    return;
+                }
                 if (mOpenCallback != null) {
                     try {
                         CameraCharacteristics props =
                                 mCameraManager.getCameraCharacteristics(mCameraId);
                         CameraDeviceInfo.Characteristics characteristics =
                                 getCameraDeviceInfo().getCharacteristics(mCameraIndex);
+
+                        /*
+                         * SPRD @{
+                         * Original Code
+                         *
                         mCameraProxy = new AndroidCamera2ProxyImpl(AndroidCamera2AgentImpl.this,
                                 mCameraIndex, mCamera, characteristics, props);
+                         */
+                        if (mSprdAgentImpl == null) {
+                            mCameraProxy = new AndroidCamera2ProxyImpl(AndroidCamera2AgentImpl.this,
+                                    mCameraIndex, mCamera, characteristics, props);
+                        } else {
+                            mCameraProxy = mSprdAgentImpl.new SprdAndroidCamera2ProxyImpl(
+                                    mSprdAgentImpl, mCameraIndex, mCamera, characteristics, props);
+                        }
+                        /* @} */
+
                         mPersistentSettings = new Camera2RequestSettingsSet();
                         mActiveArray =
                                 props.get(CameraCharacteristics.SENSOR_INFO_ACTIVE_ARRAY_SIZE);
                         mLegacyDevice =
                                 props.get(CameraCharacteristics.INFO_SUPPORTED_HARDWARE_LEVEL) ==
                                         CameraCharacteristics.INFO_SUPPORTED_HARDWARE_LEVEL_LEGACY;
+                        try {
+                            mIsYuvSensor = props.get(CameraCharacteristics.ANDROID_SPRD_AVAILABLESENSORTYPE) == 2;//2 is yuvsensor
+                        } catch (Exception e) {
+                            Log.i(TAG,"this tag is not avaliable in this product ");
+                        }
                         changeState(AndroidCamera2StateHolder.CAMERA_UNCONFIGURED);
-                        mOpenCallback.onCameraOpened(mCameraProxy);
+                        if (!mDispatchThread.hasRunnable(mCloseCameraRunnable) &&
+                                !mCameraHandler.hasMessages(CameraActions.RELEASE)) // for Bug 1172831 & Bug 1180958
+                            mOpenCallback.onCameraOpened(mCameraProxy);
+                        else
+                            Log.w(TAG , "camera will be released , do not post 'mCallback.onCameraOpened' to main thread");
                     } catch (CameraAccessException ex) {
                         mOpenCallback.onDeviceOpenFailure(mCameraIndex,
                                 generateHistoryString(mCameraIndex));
                     }
                 }
+
+                // SPRD
+                Log.i(TAG,"onOpened CameraDevice end mOpenCallback=" + mOpenCallback);
             }
 
             @Override
             public void onDisconnected(CameraDevice camera) {
                 Log.w(TAG, "Camera device '" + mCameraIndex + "' was disconnected");
+                mOpenCallback.onDisconnected(mCameraIndex);
             }
 
             @Override
@@ -817,12 +1288,19 @@ class AndroidCamera2AgentImpl extends CameraAgent {
             }};
 
         // This callback monitors our camera session (i.e. our transition into and out of preview).
-        private CameraCaptureSession.StateCallback mCameraPreviewStateCallback =
+        protected CameraCaptureSession.StateCallback mCameraPreviewStateCallback =
                 new CameraCaptureSession.StateCallback() {
             @Override
             public void onConfigured(CameraCaptureSession session) {
                 mSession = session;
                 changeState(AndroidCamera2StateHolder.CAMERA_PREVIEW_READY);
+                // Bug 915151. callback be set to null after null-judgement
+                CameraStartVideoCallback tmpCallback = getCameraStartVideoCallback();
+                Log.i(TAG, " getCameraStartVideoCallback = " + tmpCallback);
+                if (tmpCallback != null) {
+                    startRecoderRequest();
+                    tmpCallback.onVideoStart();
+                }
             }
 
             @Override
@@ -848,7 +1326,8 @@ class AndroidCamera2AgentImpl extends CameraAgent {
         }
 
         // This callback monitors requested captures and notifies any relevant callbacks.
-        private CameraResultStateCallback mCameraResultStateCallback =
+        //private CameraResultStateCallback mCameraResultStateCallback =
+        protected CameraResultStateCallback mCameraResultStateCallback =
                 new CameraResultStateCallback() {
             private int mLastAfState = -1;
             private long mLastAfFrameNumber = -1;
@@ -883,7 +1362,9 @@ class AndroidCamera2AgentImpl extends CameraAgent {
                         switch (afState) {
                             case CaptureResult.CONTROL_AF_STATE_PASSIVE_SCAN:
                             case CaptureResult.CONTROL_AF_STATE_PASSIVE_FOCUSED:
-                            case CaptureResult.CONTROL_AF_STATE_PASSIVE_UNFOCUSED: {
+                            /**
+                             * SPRD:fix bug916933/909004
+                            case CaptureResult.CONTROL_AF_STATE_PASSIVE_UNFOCUSED:*/ {
                                 if (afStateChanged && mPassiveAfCallback != null) {
                                     // A CameraAFMoveCallback is attached. If we just started to
                                     // scan, the motor is moving; otherwise, it has settled.
@@ -912,9 +1393,21 @@ class AndroidCamera2AgentImpl extends CameraAgent {
                             }
                         }
                     }
+
+                    // SPRD
+                    onMonitorControlStates(result);
                 }
 
                 Integer aeStateMaybe = result.get(CaptureResult.CONTROL_AE_STATE);
+                /*Sprd fix bug:1020311 use ae state instead of CONTROL_SPRD_NEED_AF_BEFORE_CAPTURE@{*/
+                Integer needAfValue = result.get(CaptureResult.CONTROL_SPRD_NEED_AF_BEFORE_CAPTURE);
+                if ((needAfValue != null && needAfValue == 1) ||
+                        (aeStateMaybe != null && aeStateMaybe == CaptureResult.CONTROL_AE_STATE_FLASH_REQUIRED)){
+                    mNeedAfBeforeCapture = true;
+                } else {
+                    mNeedAfBeforeCapture = false;
+                }
+                /*@}*/
                 if (aeStateMaybe != null) {
                     int aeState = aeStateMaybe;
                     // Since we handle both partial and total results for multiple frames here, we
@@ -932,7 +1425,7 @@ class AndroidCamera2AgentImpl extends CameraAgent {
                                 // This check must be made regardless of whether the exposure state
                                 // has changed recently to avoid infinite waiting during
                                 // takePicture() when the algorithm has already converged.
-                                if (mOneshotCaptureCallback != null) {
+                                if (mOneshotCaptureCallback != null && mSession != null) {//SPRD:fix bug922199
                                     // A call to takePicture() was just made, and autoexposure
                                     // converged so it's time to initiate the capture!
                                     mCaptureReader.setOnImageAvailableListener(
@@ -970,16 +1463,22 @@ class AndroidCamera2AgentImpl extends CameraAgent {
                                         CaptureFailure failure) {
                 Log.e(TAG, "Capture attempt failed with reason " + failure.getReason());
             }};
+
+            // SPRD
+            protected void onMonitorControlStates(CaptureResult result) {
+                // NOTE: need implement, DO NOT ADD CODE IN HERE
+            }
     }
 
-    private class AndroidCamera2ProxyImpl extends CameraAgent.CameraProxy {
+    protected class AndroidCamera2ProxyImpl extends CameraAgent.CameraProxy {
         private final AndroidCamera2AgentImpl mCameraAgent;
         private final int mCameraIndex;
         private final CameraDevice mCamera;
         private final CameraDeviceInfo.Characteristics mCharacteristics;
         private final AndroidCamera2Capabilities mCapabilities;
-        private CameraSettings mLastSettings;
+        protected CameraSettings mLastSettings;
         private boolean mShutterSoundEnabled;
+        protected Runnable takePictureRunnable = null;
 
         public AndroidCamera2ProxyImpl(
                 AndroidCamera2AgentImpl agent,
@@ -994,6 +1493,18 @@ class AndroidCamera2AgentImpl extends CameraAgent {
             mCapabilities = new AndroidCamera2Capabilities(properties);
             mLastSettings = null;
             mShutterSoundEnabled = true;
+        }
+
+        protected void finalize() throws Throwable {
+            takePictureRunnable = null;
+            super.finalize();
+        }
+
+        public boolean cancelBurstCapture(CancelBurstCaptureCallback cd) {
+            Log.i(TAG, "cancelBurstCapture will call removeJob");
+            if(takePictureRunnable != null)
+                return mDispatchThread.removeJob(takePictureRunnable);
+            return false;
         }
 
         // TODO: Implement
@@ -1081,8 +1592,27 @@ class AndroidCamera2AgentImpl extends CameraAgent {
                             };
                         }
 
+                        /*
+                         * SPRD: Fix bug 681215 waitForStates() will block forever if no message
+                         * named START_PREVIEW or AUTO_FOCUS being processed, because DispatchThread
+                         * get blocked at the same time, follow-up messages can't be handled.
+                         *
+                         * to avoid this, use waitForStatesWithTimeout(), it provides real block-wait
+                         * and wont throw exception.
+                         *
                         mCameraState.waitForStates(AndroidCamera2StateHolder.CAMERA_PREVIEW_ACTIVE |
                                 AndroidCamera2StateHolder.CAMERA_FOCUS_LOCKED);
+                          */
+                        boolean success = mCameraState.waitForStatesWithTimeout(
+                                AndroidCamera2StateHolder.CAMERA_PREVIEW_ACTIVE
+                                        | AndroidCamera2StateHolder.CAMERA_FOCUS_LOCKED | CAMERA_RECODERING,
+                                CameraAgent.WATI_STATE_TIMEOUT);
+                        if (!success) {
+                            Log.w(TAG, "cancel sending autofocus");
+                            return;
+                        }
+                        /* @} */
+
                         mCameraHandler.obtainMessage(CameraActions.AUTO_FOCUS, cbForward)
                                 .sendToTarget();
                     }
@@ -1130,19 +1660,30 @@ class AndroidCamera2AgentImpl extends CameraAgent {
                                 CameraPictureCallback raw,
                                 CameraPictureCallback postview,
                                 final CameraPictureCallback jpeg) {
+            // SPRD
+            Log.i(TAG,"AppFw takePicture");
+
             // TODO: We never call raw or postview
             final CaptureAvailableListener picListener =
                     new CaptureAvailableListener() {
                 @Override
                 public void onCaptureStarted(CameraCaptureSession session, CaptureRequest request,
                                              long timestamp, long frameNumber) {
+                    // SPRD
+                    Log.i(TAG,"AppFw takePicture onCaptureStarted");
+
                     if (shutter != null) {
                         handler.post(new Runnable() {
                             @Override
                             public void run() {
+                                /*
+                                 * SPRD @{
+                                 * Original Code
+                                 *
                                 if (mShutterSoundEnabled) {
                                     mNoisemaker.play(MediaActionSound.SHUTTER_CLICK);
                                 }
+                                 */
                                 shutter.onShutter(AndroidCamera2ProxyImpl.this);
                             }});
                     }
@@ -1150,8 +1691,35 @@ class AndroidCamera2AgentImpl extends CameraAgent {
 
                 @Override
                 public void onImageAvailable(ImageReader reader) {
+                    // SPRD
+                    if (mPicListener != null && !mBurstCaptureCanceled) {
+                        if (mBurstHasCaptureCount < mBurstMaxCaptureCount) {
+                            Log.i(TAG, "AppFw takePicture onImageAvailable mBurstHasCaptureCount = "
+                                    + mBurstHasCaptureCount);
+                            try {
+                                mDispatchThread.runJob(new Runnable() {
+                                    @Override
+                                    public void run() {
+                                        if (mBurstCaptureCanceled) {
+                                            Log.i(TAG,"burst capture canceled");
+                                            return;
+                                        }
+                                        mCameraState.waitForStates(
+                                                ~(AndroidCamera2StateHolder.CAMERA_PREVIEW_ACTIVE - 1));
+                                        mBurstHasCaptureCount++;//SPRD:fix bug756490
+                                        mCameraHandler.obtainMessage(CameraActions.CAPTURE_PHOTO, mPicListener)
+                                                .sendToTarget();
+                                    }
+                                });
+                            } catch (RuntimeException ex) {
+                                mCameraAgent.getCameraExceptionHandler().onDispatchThreadException(ex);
+                            }
+                        }
+                    }
+                    Log.i(TAG,"AppFw takePicture onImageAvailable");
+
                     try (Image image = reader.acquireNextImage()) {
-                        if (jpeg != null) {
+                        if (!mNeedThumb && jpeg != null) {
                             ByteBuffer buffer = image.getPlanes()[0].getBuffer();
                             final byte[] pixels = new byte[buffer.remaining()];
                             buffer.get(pixels);
@@ -1160,21 +1728,57 @@ class AndroidCamera2AgentImpl extends CameraAgent {
                                 public void run() {
                                     jpeg.onPictureTaken(pixels, AndroidCamera2ProxyImpl.this);
                                 }});
+                        } else {
+                            onImageAvailableWithThumb(image, handler, jpeg);
                         }
                     }
                 }};
             try {
-                mDispatchThread.runJob(new Runnable() {
-                    @Override
-                    public void run() {
-                        // Wait until PREVIEW_ACTIVE or better
-                        mCameraState.waitForStates(
-                                ~(AndroidCamera2StateHolder.CAMERA_PREVIEW_ACTIVE - 1));
-                        mCameraHandler.obtainMessage(CameraActions.CAPTURE_PHOTO, picListener)
-                                .sendToTarget();
-                    }
-                });
+                mPicListener = picListener;
+                mBurstMaxCaptureCount = mLastSettings.mBurstNumber;
+                Log.i(TAG, "AppFw takePicture mBurstMaxCaptureCount now is " + mBurstMaxCaptureCount);
+                if(takePictureRunnable == null) {
+                    Log.i(TAG, "AppFw takePicture new runJob");
+                    takePictureRunnable = new Runnable() {
+                        @Override
+                        public void run() {
+                            // Wait until PREVIEW_ACTIVE or better
+                            /*
+                             * SPRD @{
+                             * Original Code
+                             *
+                          mCameraState.waitForStates(
+                                    ~(AndroidCamera2StateHolder.CAMERA_PREVIEW_ACTIVE - 1));
+                            mCameraHandler.obtainMessage(CameraActions.CAPTURE_PHOTO, picListener)
+                                    .sendToTarget();
+                             */
+                            Log.i(TAG, "AppFw takePicture runJob");
+                            if (mBurstMaxCaptureCount > 1) {
+                                mBurstHasCaptureCount = 0;// reset capture count, in case of didn't call
+                                // cancelBurstCapture
+                                mBurstHasCaptureCount++;
+                                mBurstCaptureCanceled = false;
+                            }
+                            // Wait until PREVIEW_ACTIVE or better
+                            mCameraState.waitForStates(~(com.android.ex.camera2.portability.AndroidCamera2AgentImpl.AndroidCamera2StateHolder.CAMERA_PREVIEW_ACTIVE - 1));
+
+                            // SPRD : Add for bug 657472 Save normal hdr picture
+                            if(mLastSettings.getNormalHdrModeEnable() == 1){
+                                mCameraHandler.obtainMessage(CameraActions.CAPTURE_HDR_PHOTO, mPicListener).sendToTarget();
+                            } else if (mNeedThumb) {
+                                mCameraHandler.obtainMessage(CameraActions.CAPTURE_PHOTO_WITH_THUMB, mPicListener).sendToTarget();
+                            } else if (mIsVideMode) {
+                                mCameraHandler.obtainMessage(CameraActions.CAPTURE_PHOTO_WITH_SNAP, mPicListener).sendToTarget();
+                            }else{
+                                mCameraHandler.obtainMessage(CameraActions.CAPTURE_PHOTO, mPicListener).sendToTarget();
+                            }
+                            /* @} */
+                        }
+                    };
+                }
+                mDispatchThread.runJob(takePictureRunnable);
             } catch (RuntimeException ex) {
+                takePictureRunnable = null;
                 mCameraAgent.getCameraExceptionHandler().onDispatchThreadException(ex);
             }
         }
@@ -1257,7 +1861,7 @@ class AndroidCamera2AgentImpl extends CameraAgent {
     }
 
     /** A linear state machine: each state entails all the states below it. */
-    private static class AndroidCamera2StateHolder extends CameraStateHolder {
+    protected static class AndroidCamera2StateHolder extends CameraStateHolder {
         // Usage flow: openCamera() -> applySettings() -> setPreviewTexture() -> startPreview() ->
         //             autoFocus() -> takePicture()
         // States are mutually exclusive, but must be separate bits so that they can be used with
@@ -1286,7 +1890,7 @@ class AndroidCamera2AgentImpl extends CameraAgent {
         }
     }
 
-    private static class AndroidCamera2DeviceInfo implements CameraDeviceInfo {
+    private static class AndroidCamera2DeviceInfo extends SprdAndroidCamera2DeviceInfo {
         private final CameraManager mCameraManager;
         private final String[] mCameraIds;
         private final int mNumberOfCameras;
@@ -1308,6 +1912,8 @@ class AndroidCamera2AgentImpl extends CameraAgent {
                     if (firstBackId == NO_DEVICE &&
                             lensDirection == CameraCharacteristics.LENS_FACING_BACK) {
                         firstBackId = id;
+                        // SPRD
+                        super.updateFeatureEnable(cameraManager, cameraIds[firstBackId]);
                     }
                     if (firstFrontId == NO_DEVICE &&
                             lensDirection == CameraCharacteristics.LENS_FACING_FRONT) {
@@ -1323,6 +1929,9 @@ class AndroidCamera2AgentImpl extends CameraAgent {
 
         @Override
         public Characteristics getCharacteristics(int cameraId) {
+            // SPRD
+            cameraId = super.getActualCameraId(cameraId);
+
             String actualId = mCameraIds[cameraId];
             try {
                 CameraCharacteristics info = mCameraManager.getCameraCharacteristics(actualId);
@@ -1417,4 +2026,6 @@ class AndroidCamera2AgentImpl extends CameraAgent {
             }
         }
     }
+
+    protected static abstract class CameraPreViewCallbackAbstract implements CameraPreviewDataCallback, ImageReader.OnImageAvailableListener {};
 }

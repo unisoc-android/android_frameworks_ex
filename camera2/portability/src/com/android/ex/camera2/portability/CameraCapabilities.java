@@ -33,7 +33,7 @@ import java.util.TreeSet;
  * of which thread using it.
  * </p>
  */
-public class CameraCapabilities {
+public class CameraCapabilities extends SprdCameraCapabilities {
 
     private static Log.Tag TAG = new Log.Tag("CamCapabs");
 
@@ -64,6 +64,7 @@ public class CameraCapabilities {
     protected float mMaxZoomRatio;
     protected float mHorizontalViewAngle;
     protected float mVerticalViewAngle;
+    protected boolean mIsSupportFlash;
     private final Stringifier mStringifier;
 
     /**
@@ -316,7 +317,7 @@ public class CameraCapabilities {
      * A interface stringifier to convert abstract representations to API
      * related string representation.
      */
-    public static class Stringifier {
+    public static class Stringifier extends SprdStringifier {
         /**
          * Converts the string to hyphen-delimited lowercase for compatibility with multiple APIs.
          *
@@ -464,6 +465,9 @@ public class CameraCapabilities {
      * @param stringifier The API-specific stringifier for this instance.
      */
     CameraCapabilities(Stringifier stringifier) {
+        // SPRD
+        super(stringifier);
+
         mStringifier = stringifier;
     }
 
@@ -472,6 +476,9 @@ public class CameraCapabilities {
      * @param src The source instance.
      */
     public CameraCapabilities(CameraCapabilities src) {
+        // SPRD
+        super(src);
+
         mSupportedPreviewFpsRange.addAll(src.mSupportedPreviewFpsRange);
         mSupportedPreviewSizes.addAll(src.mSupportedPreviewSizes);
         mSupportedPreviewFormats.addAll(src.mSupportedPreviewFormats);
@@ -669,6 +676,10 @@ public class CameraCapabilities {
         return mMaxNumOfFacesSupported;
     }
 
+    public boolean isSupportFlash(){
+        return mIsSupportFlash;
+    }
+
     /**
      * @return The stringifier used by this instance.
      */
@@ -680,12 +691,12 @@ public class CameraCapabilities {
         final float ratio = settings.getCurrentZoomRatio();
         if (!supports(Feature.ZOOM)) {
             if (ratio != ZOOM_RATIO_UNZOOMED) {
-                Log.v(TAG, "Zoom is not supported");
+                Log.i(TAG, "Zoom is not supported");
                 return false;
             }
         } else {
             if (settings.getCurrentZoomRatio() > getMaxZoomRatio()) {
-                Log.v(TAG, "Zoom ratio is not supported: ratio = " +
+                Log.i(TAG, "Zoom ratio is not supported: ratio = " +
                         settings.getCurrentZoomRatio());
                 return false;
             }
@@ -696,7 +707,7 @@ public class CameraCapabilities {
     private boolean exposureCheck(final CameraSettings settings) {
         final int index = settings.getExposureCompensationIndex();
         if (index > getMaxExposureCompensation() || index < getMinExposureCompensation()) {
-            Log.v(TAG, "Exposure compensation index is not supported. Min = " +
+            Log.i(TAG, "Exposure compensation index is not supported. Min = " +
                     getMinExposureCompensation() + ", max = " + getMaxExposureCompensation() + "," +
                     " setting = " + index);
             return false;
@@ -713,7 +724,7 @@ public class CameraCapabilities {
                 Log.w(TAG, "Focus mode not supported... trying FIXED");
                 settings.setFocusMode(FocusMode.FIXED);
             } else {
-                Log.v(TAG, "Focus mode not supported:" +
+                Log.i(TAG, "Focus mode not supported:" +
                         (focusMode != null ? focusMode.name() : "null"));
                 return false;
             }
@@ -724,7 +735,7 @@ public class CameraCapabilities {
     private boolean flashCheck(final CameraSettings settings) {
         FlashMode flashMode = settings.getCurrentFlashMode();
         if (!supports(flashMode)) {
-            Log.v(TAG,
+            Log.i(TAG,
                     "Flash mode not supported:" + (flashMode != null ? flashMode.name() : "null"));
             return false;
         }
@@ -736,16 +747,16 @@ public class CameraCapabilities {
         if (mSupportedPhotoSizes.contains(photoSize)) {
             return true;
         }
-        Log.v(TAG, "Unsupported photo size:" + photoSize);
+        Log.i(TAG, "Unsupported photo size:" + photoSize);
         return false;
     }
 
     private boolean previewSizeCheck(final CameraSettings settings) {
         final Size previewSize = settings.getCurrentPreviewSize();
-        if (mSupportedPreviewSizes.contains(previewSize)) {
+        if (mSupportedPreviewSizes.contains(previewSize) || 1 == settings.get3DNREnable()) {
             return true;
         }
-        Log.v(TAG, "Unsupported preview size:" + previewSize);
+        Log.i(TAG, "Unsupported preview size:" + previewSize);
         return false;
     }
 
@@ -753,7 +764,7 @@ public class CameraCapabilities {
         if (!settings.isVideoStabilizationEnabled() || supports(Feature.VIDEO_STABILIZATION)) {
             return true;
         }
-        Log.v(TAG, "Video stabilization is not supported");
+        Log.i(TAG, "Video stabilization is not supported");
         return false;
     }
 }

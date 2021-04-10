@@ -45,7 +45,7 @@ import java.util.StringTokenizer;
 /**
  * A class to implement {@link CameraAgent} of the Android camera framework.
  */
-class AndroidCameraAgentImpl extends CameraAgent {
+class AndroidCameraAgentImpl extends SprdAndroidCameraAgentImpl {
     private static final Log.Tag TAG = new Log.Tag("AndCamAgntImp");
 
     private CameraDeviceInfo.Characteristics mCharacteristics;
@@ -125,7 +125,7 @@ class AndroidCameraAgentImpl extends CameraAgent {
         mExceptionHandler = exceptionHandler != null ? exceptionHandler : sDefaultExceptionHandler;
     }
 
-    private static class AndroidCameraDeviceInfo implements CameraDeviceInfo {
+    private static class AndroidCameraDeviceInfo extends SprdAndroidCameraDeviceInfo {
         private final Camera.CameraInfo[] mCameraInfos;
         private final int mNumberOfCameras;
         private final int mFirstBackCameraId;
@@ -173,6 +173,9 @@ class AndroidCameraAgentImpl extends CameraAgent {
 
         @Override
         public Characteristics getCharacteristics(int cameraId) {
+            // SPRD
+            cameraId = super.getTruthCameraId(cameraId);
+
             Camera.CameraInfo info = mCameraInfos[cameraId];
             if (info != null) {
                 return new AndroidCharacteristics(info);
@@ -257,9 +260,9 @@ class AndroidCameraAgentImpl extends CameraAgent {
     /**
      * The handler on which the actual camera operations happen.
      */
-    private class CameraHandler extends HistoryHandler implements Camera.ErrorCallback {
+    private class CameraHandler extends SprdCameraHandler implements Camera.ErrorCallback {
         private CameraAgent mAgent;
-        private Camera mCamera;
+//        private Camera mCamera; // SPRD defined in super class
         private int mCameraId = -1;
         private ParametersCache mParameterCache;
         private int mCancelAfPending = 0;
@@ -305,7 +308,7 @@ class AndroidCameraAgentImpl extends CameraAgent {
         }
 
         @TargetApi(Build.VERSION_CODES.JELLY_BEAN_MR1)
-        private void enableShutterSound(boolean enable) {
+        protected void enableShutterSound(boolean enable) {
             mCamera.enableShutterSound(enable);
         }
 
@@ -350,10 +353,18 @@ class AndroidCameraAgentImpl extends CameraAgent {
             super.handleMessage(msg);
 
             if (getCameraState().isInvalid()) {
-                Log.v(TAG, "Skip handleMessage - action = '" + CameraActions.stringify(msg.what) + "'");
+                Log.i(TAG, "Skip handleMessage - action = '" + CameraActions.stringify(msg.what) + "'");
                 return;
             }
-            Log.v(TAG, "handleMessage - action = '" + CameraActions.stringify(msg.what) + "'");
+            /* SPRD: fix bug597061/597065/597071 not set to invalid when catch exception for next can open camera @*/
+            if (mCameraState.getState() == AndroidCameraStateHolder.CAMERA_UNOPENED
+                    && msg.what != CameraActions.OPEN_CAMERA) {
+                Log.i(TAG, "handleMessage - action = '" + CameraActions.stringify(msg.what) + "'"
+                        + " mCameraState = " + mCameraState.getState());
+                return;
+            }
+            /* @}*/
+            Log.i(TAG, "handleMessage - action = '" + CameraActions.stringify(msg.what) + "'" + " mCamera = " + mCamera);
 
             int cameraAction = msg.what;
             try {
@@ -381,8 +392,18 @@ class AndroidCameraAgentImpl extends CameraAgent {
 
                             mCameraState.setState(AndroidCameraStateHolder.CAMERA_IDLE);
                             if (openCallback != null) {
+                                /*
+                                 * SPRD:fix bug527657  Crash: com.android.camera2,(java.lang.RuntimeException)
+                                 * @{
+                                 * android original code
                                 CameraProxy cameraProxy = new AndroidCameraProxyImpl(
                                         mAgent, cameraId, mCamera, mCharacteristics, mCapabilities);
+                                */
+                                CameraProxy cameraProxy = new AndroidCameraProxyImpl(
+                                        mAgent, cameraId, mCamera, mCharacteristics, mCapabilities,mCameraHandler);
+                                Log.i(TAG, "cameraProxy = " + cameraProxy);
+                                /*@}*/
+
                                 openCallback.onCameraOpened(cameraProxy);
                             }
                         } else {
@@ -402,6 +423,12 @@ class AndroidCameraAgentImpl extends CameraAgent {
                         } else {
                             Log.w(TAG, "Releasing camera without any camera opened.");
                         }
+
+                        // SPRD
+                        if (mCameraCloseCallback != null) {
+                            mCameraCloseCallback.onCameraClosed();
+                        }
+
                         break;
                     }
 
@@ -420,9 +447,18 @@ class AndroidCameraAgentImpl extends CameraAgent {
 
                         mCameraState.setState(AndroidCameraStateHolder.CAMERA_IDLE);
                         if (cbForward != null) {
+                            /*
+                             * SPRD:fix bug527657  Crash: com.android.camera2,(java.lang.RuntimeException)
+                             * @{
+                             * android original code
                             cbForward.onCameraOpened(
                                     new AndroidCameraProxyImpl(AndroidCameraAgentImpl.this,
                                             cameraId, mCamera, mCharacteristics, mCapabilities));
+                             */
+                            cbForward.onCameraOpened(
+                                    new AndroidCameraProxyImpl(AndroidCameraAgentImpl.this,
+                                            cameraId, mCamera, mCharacteristics, mCapabilities,mCameraHandler));
+                            /*@}*/
                         }
                         break;
                     }
@@ -458,6 +494,10 @@ class AndroidCameraAgentImpl extends CameraAgent {
                         final CameraStartPreviewCallbackForward cbForward =
                             (CameraStartPreviewCallbackForward) msg.obj;
                         mCamera.startPreview();
+
+                        // SPRD
+                        mPreviewStarted = true;
+
                         if (cbForward != null) {
                             cbForward.onPreviewStarted();
                         }
@@ -465,8 +505,19 @@ class AndroidCameraAgentImpl extends CameraAgent {
                     }
 
                     // TODO: Unlock the CameraSettings object's sizes
+                    // SPRD
+                    case CameraActions.STOP_PREVIEW_WITHOUT_FLUSH:
                     case CameraActions.STOP_PREVIEW: {
                         mCamera.stopPreview();
+
+                        // SPRD
+                        mPreviewStarted = false;
+
+                        /* SPRD:fix bug758450 change state after stoppreview @{ */
+                        if (mCameraState.getState() != AndroidCameraStateHolder.CAMERA_UNOPENED) {
+                            mCameraState.setState(AndroidCameraStateHolder.CAMERA_IDLE);
+                        }
+                        /* @} */
                         break;
                     }
 
@@ -487,10 +538,17 @@ class AndroidCameraAgentImpl extends CameraAgent {
 
                     case CameraActions.AUTO_FOCUS: {
                         if (mCancelAfPending > 0) {
-                            Log.v(TAG, "handleMessage - Ignored AUTO_FOCUS because there was "
+                            Log.i(TAG, "handleMessage - Ignored AUTO_FOCUS because there was "
                                     + mCancelAfPending + " pending CANCEL_AUTO_FOCUS messages");
                             break; // ignore AF because a CANCEL_AF is queued after this
                         }
+
+                        // SPRD
+                        if (!mPreviewStarted) {
+                            Log.w(TAG, "Ignoring attempt to autofocus without preview");
+                            break;
+                        }
+
                         mCameraState.setState(AndroidCameraStateHolder.CAMERA_FOCUSING);
                         mCamera.autoFocus((AutoFocusCallback) msg.obj);
                         break;
@@ -551,6 +609,12 @@ class AndroidCameraAgentImpl extends CameraAgent {
                     }
 
                     case CameraActions.START_FACE_DETECTION: {
+                        // SPRD
+                        if (!mPreviewStarted) {
+                            Log.w(TAG, "Ignoring attempt to startFaceDetection without preview");
+                            break;
+                        }
+
                         startFaceDetection();
                         break;
                     }
@@ -610,6 +674,17 @@ class AndroidCameraAgentImpl extends CameraAgent {
                         break;
                     }
 
+                    // SPRD: fix bug473462
+                    case CameraActions.CANCEL_CAPTURE_BURST_PHOTO: {
+                        break;
+                    }
+
+                    // SPRD
+                    case CameraActions.SET_SENSOR_SELF_SHOT_LISTENER: {
+                        setSensorSelfShotListenerApi1((Camera.SensorSelfShotListenerApi1) msg.obj);
+                        break;
+                    }
+
                     default: {
                         Log.e(TAG, "Invalid CameraProxy message=" + msg.what);
                     }
@@ -619,6 +694,9 @@ class AndroidCameraAgentImpl extends CameraAgent {
                 String errorContext = "CameraAction[" + CameraActions.stringify(cameraAction) +
                         "] at CameraState[" + cameraState + "]";
                 Log.e(TAG, "RuntimeException during " + errorContext, ex);
+
+                // SPRD fix bug597061/597065/597071 not set to invalid when catch exception for next can open camera
+                mCameraState.setState(AndroidCameraStateHolder.CAMERA_UNOPENED);
 
                 if (mCamera != null) {
                     Log.i(TAG, "Release camera since mCamera is not null.");
@@ -693,7 +771,13 @@ class AndroidCameraAgentImpl extends CameraAgent {
                 }
             }
             if (settings.getCurrentFlashMode() != CameraCapabilities.FlashMode.NO_FLASH) {
-                parameters.setFlashMode(stringifier.stringify(settings.getCurrentFlashMode()));
+                if (settings.getCurrentFlashType() == CameraSettings.VALUE_FRONT_FLASH_MODE_LED){
+                    //set flash mode for led
+                    parameters.setFlashMode(stringifier.stringify(settings.getCurrentFlashMode()));
+                } else {
+                    //set flash mode for lcd
+                    parameters.setFlashLcdMode(updateFlashMode(settings.getCurrentFlashMode()));
+                }
             }
             if (settings.getCurrentSceneMode() != CameraCapabilities.SceneMode.NO_SCENE_MODE) {
                 if (settings.getCurrentSceneMode() != null) {
@@ -724,6 +808,8 @@ class AndroidCameraAgentImpl extends CameraAgent {
                 }
             }
 
+            // SPRD
+            applySuperSettingsToParameters(settings, parameters, mCapabilities);
         }
 
         /**
@@ -754,25 +840,46 @@ class AndroidCameraAgentImpl extends CameraAgent {
      * A class which implements {@link CameraAgent.CameraProxy} and
      * camera handler thread.
      */
-    private class AndroidCameraProxyImpl extends CameraAgent.CameraProxy {
+    private class AndroidCameraProxyImpl extends SprdAndroidCameraProxyImpl {
         private final CameraAgent mCameraAgent;
         private final int mCameraId;
         /* TODO: remove this Camera instance. */
-        private final Camera mCamera;
+//        private final Camera mCamera; // SPRD
         private final CameraDeviceInfo.Characteristics mCharacteristics;
         private final AndroidCameraCapabilities mCapabilities;
 
+        //SPRD:fix bug527657  Crash: com.android.camera2,(java.lang.RuntimeException)
+        private final CameraHandler mHandler;
+        private CameraSettings mLastSettings;
+
+        /*
+         * SPRD:fix bug527657  Crash: com.android.camera2,(java.lang.RuntimeException)
+         * @{
+         * android original code
         private AndroidCameraProxyImpl(
                 CameraAgent cameraAgent,
                 int cameraId,
                 Camera camera,
                 CameraDeviceInfo.Characteristics characteristics,
                 AndroidCameraCapabilities capabilities) {
+        */
+        private AndroidCameraProxyImpl(
+                CameraAgent cameraAgent,
+                int cameraId,
+                Camera camera,
+                CameraDeviceInfo.Characteristics characteristics,
+                AndroidCameraCapabilities capabilities,
+                CameraHandler handler) {
+        /*@}*/
             mCameraAgent = cameraAgent;
-            mCamera = camera;
+//            mCamera = camera; // SPRD
             mCameraId = cameraId;
             mCharacteristics = characteristics;
             mCapabilities = capabilities;
+
+            // SPRD:fix bug527657  Crash: com.android.camera2,(java.lang.RuntimeException)
+            mHandler = handler;
+            mLastSettings = null;
         }
 
         @Deprecated
@@ -781,7 +888,19 @@ class AndroidCameraAgentImpl extends CameraAgent {
             if (getCameraState().isInvalid()) {
                 return null;
             }
+
+            /*
+             * SPRD:fix bug527657  Crash: com.android.camera2,(java.lang.RuntimeException)
+             * @{
+             * android original code
             return mCamera;
+            */
+            if (mHandler != null) {
+                return mHandler.getCamera();
+            } else {
+                return null;
+            }
+            /*@}*/
         }
 
         @Override
@@ -871,7 +990,15 @@ class AndroidCameraAgentImpl extends CameraAgent {
                     if (getCameraState().isInvalid()) {
                         return;
                     }
+                    /*
+                     * SPRD: Fix bug 751782 that allow autofocus in mediarecording
+                     * Original Code
+                     *
                     mCameraState.waitForStates(AndroidCameraStateHolder.CAMERA_IDLE);
+                     */
+                    mCameraState.waitForStates(AndroidCameraStateHolder.CAMERA_IDLE
+                            | AndroidCameraStateHolder.CAMERA_UNLOCKED);
+                    /* @} */
                     mCameraHandler.obtainMessage(CameraActions.AUTO_FOCUS, afCallback)
                             .sendToTarget();
                 }
@@ -977,11 +1104,18 @@ class AndroidCameraAgentImpl extends CameraAgent {
             }
         }
 
+        // SPRD
+        @Override
+        public void setSensorSelfShotCallback(Handler handler, CameraSensorSelfShotCallback callback) {
+            mCameraHandler.obtainMessage(CameraActions.SET_SENSOR_SELF_SHOT_LISTENER,
+                    SensorSelfShotCallbackForward.getNewInstance(handler, callback)).sendToTarget();
+        }
+
         @Deprecated
         @Override
         public void setParameters(final Parameters params) {
             if (params == null) {
-                Log.v(TAG, "null parameters in setParameters()");
+                Log.i(TAG, "null parameters in setParameters()");
                 return;
             }
             final String flattenedParameters = params.flatten();
@@ -1022,13 +1156,38 @@ class AndroidCameraAgentImpl extends CameraAgent {
 
         @Override
         public CameraSettings getSettings() {
+            /*
+             * SPRD:fix bug616836 add for api1 use reconnect
+             * original code
             return new AndroidCameraSettings(mCapabilities, getParameters());
+             */
+            if (mLastSettings == null) {
+                mLastSettings = new AndroidCameraSettings(mCapabilities, getParameters());
+            }
+            return mLastSettings;
+            /* @}*/
         }
 
         @Override
         public boolean applySettings(CameraSettings settings) {
+            /*
+             *  SPRD: fix bug597061/597065/597071 not set to invalid when catch exception for next can open camera @
+             *  original code
             return applySettingsHelper(settings, AndroidCameraStateHolder.CAMERA_IDLE |
                     AndroidCameraStateHolder.CAMERA_UNLOCKED);
+             */
+            if (mCameraState.getState() == AndroidCameraStateHolder.CAMERA_UNOPENED) {
+                return false;
+            }
+
+            if (applySettingsHelper(settings, AndroidCameraStateHolder.CAMERA_IDLE |
+                    AndroidCameraStateHolder.CAMERA_UNLOCKED)) {
+                mLastSettings = settings;
+                return true;
+            }
+
+            return false;
+            /* @}*/
         }
 
         @Override
@@ -1329,15 +1488,42 @@ class AndroidCameraAgentImpl extends CameraAgent {
             mCallback = cb;
         }
 
+        private int mLastFrameNumberOfFaces = 0;
+
         @Override
         public void onFaceDetection(
                 final Camera.Face[] faces, Camera camera) {
+            final boolean faceChange = mLastFrameNumberOfFaces != faces.length;
+            mLastFrameNumberOfFaces = faces.length;
             mHandler.post(new Runnable() {
                 @Override
                 public void run() {
-                    mCallback.onFaceDetection(faces, mCamera);
+                    mCallback.onFaceDetection(faces, null,faceChange);
                 }
             });
         }
+    }
+
+    private byte updateFlashMode(CameraCapabilities.FlashMode flashMode) {
+        int flashLcdMode = 0;
+        switch (flashMode) {
+            case AUTO: {
+                flashLcdMode = 1;
+                break;
+            }
+            case OFF: {
+                flashLcdMode = 0;
+                break;
+            }
+            case ON: {
+                flashLcdMode = 2;
+                break;
+            }
+            default: {
+                Log.w(TAG, "Unable to convert to API 1 flash lcd mode: " + flashMode);
+                break;
+            }
+        }
+        return (byte)flashLcdMode;
     }
 }

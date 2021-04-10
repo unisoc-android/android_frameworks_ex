@@ -26,6 +26,11 @@ public class Log {
      * adb shell setprop log.tag.CAM2PORT_ VERBOSE
      * adb shell setprop log.tag.CAM2PORT_ ""
      */
+    private static final String DEBUG_ABLE = "ro.debuggable";
+    private static boolean isDebuggable = true;
+    static {
+        isDebuggable = android.os.SystemProperties.getBoolean(DEBUG_ABLE,true);
+    }
     public static final String CAMERA_LOGTAG_PREFIX = "CAM2PORT_";
     private static final Log.Tag TAG = new Log.Tag("Log");
 
@@ -92,13 +97,13 @@ public class Log {
     }
 
     public static void v(Tag tag, String msg) {
-        if (isLoggable(tag, android.util.Log.VERBOSE)) {
+        if (isLoggable(tag, android.util.Log.VERBOSE) && isDebuggable) {
             android.util.Log.v(tag.toString(), msg);
         }
     }
 
     public static void v(Tag tag, String msg, Throwable tr) {
-        if (isLoggable(tag, android.util.Log.VERBOSE)) {
+        if (isLoggable(tag, android.util.Log.VERBOSE) && isDebuggable) {
             android.util.Log.v(tag.toString(), msg, tr);
         }
     }

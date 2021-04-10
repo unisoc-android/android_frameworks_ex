@@ -34,12 +34,19 @@ public class DispatchThread extends Thread {
     private Handler mCameraHandler;
     private HandlerThread mCameraHandlerThread;
 
+    //SPRD Bug:508634,add wait time 2500ms
+    private static final long VAL_WAIT_DONE_RELEASE_TIMEOUT = 2500L;
+
     public DispatchThread(Handler cameraHandler, HandlerThread cameraHandlerThread) {
         super("Camera Job Dispatch Thread");
         mJobQueue = new LinkedList<Runnable>();
         mIsEnded = new Boolean(false);
         mCameraHandler = cameraHandler;
         mCameraHandlerThread = cameraHandlerThread;
+    }
+
+    public void setHandler(Handler handler) {
+        mCameraHandler = handler;
     }
 
     /**
@@ -134,17 +141,31 @@ public class DispatchThread extends Thread {
 
             job.run();
 
+            // SPRD Bug:508634,add wait time 2500ms
+            Log.i(TAG, "Runnable job.run() end!");
+
             synchronized (DispatchThread.this) {
                 mCameraHandler.post(new Runnable() {
                     @Override
                     public void run() {
                         synchronized (DispatchThread.this) {
                             DispatchThread.this.notifyAll();
+
+                            // SPRD Bug:508634,add wait time 2500ms
+                            Log.i(TAG, "DispatchThread.this.notifyAll()!");
                         }
                     }
                 });
                 try {
+                    /*
+                     * SPRD Bug:508634,add wait time 2500ms @{
+                     * Original Android code:
                     DispatchThread.this.wait();
+                     */
+                    Log.i(TAG, "DispatchThread.this.wait will!");
+                    DispatchThread.this.wait(VAL_WAIT_DONE_RELEASE_TIMEOUT);// SPRD:Fix bug 508634
+                    Log.i(TAG, "DispatchThread.this.wait end!");
+                    /* @} */
                 } catch (InterruptedException ex) {
                     // TODO: do something here.
                 }

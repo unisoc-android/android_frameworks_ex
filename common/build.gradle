@@ -1,12 +1,14 @@
-apply plugin: 'android-library'
-apply plugin: 'logtags'
+apply plugin: 'com.android.library'
+//apply plugin: 'logtags'
 
 android {
+    compileSdkVersion 28
+    buildToolsVersion '28.0.3'
     sourceSets {
         main {
             manifest.srcFile 'AndroidManifest.xml'
             java.srcDirs = ['java']
-            logtags.srcDirs = ['java']
+//            logtags.srcDirs = ['java']
         }
     }
 

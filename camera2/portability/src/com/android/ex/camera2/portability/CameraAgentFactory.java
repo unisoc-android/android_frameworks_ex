@@ -126,7 +126,7 @@ public class CameraAgentFactory {
             }
 
             if (sAndroidCamera2Agent == null) {
-                sAndroidCamera2Agent = new AndroidCamera2AgentImpl(context);
+                sAndroidCamera2Agent = new SprdAndroidCamera2AgentImpl(context);
                 sAndroidCamera2AgentClientCount = 1;
             } else {
                 ++sAndroidCamera2AgentClientCount;
